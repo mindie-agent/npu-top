@@ -308,7 +308,7 @@ def attach_npu_telemetry(devices: list[dict[str, Any]], info: str) -> None:
     details: dict[int, dict[str, float | str]] = {}
     for line in info.splitlines():
         match = re.search(
-            r"\|\s*(\d+)\s+([A-Za-z0-9_.-]+)\s+\|\s*([A-Za-z_.-]+)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)",
+            r"\|\s*(\d+)\s+([A-Za-z0-9_.-]+)\s+\|\s*([A-Za-z_.-]+)\s+(?:\|\s*)?(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)",
             line,
         )
         if match and not match.group(2).isdigit():
