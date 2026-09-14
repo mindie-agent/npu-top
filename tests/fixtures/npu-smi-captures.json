@@ -1,0 +1,40 @@
+{
+  "capture_date": "2026-09-14",
+  "capture_method": "Monitor WorkspaceDeviceAdapter SSH transport; FAST_SCRIPT sections, outer section framing removed. Raw table text retained.",
+  "samples": [
+    {
+      "hardware": "A3",
+      "host": "80.5.17.106",
+      "npu_smi_version": "26.1.0.b087",
+      "commands": [
+        {
+          "command": "npu-smi info",
+          "file": "a3-106.txt",
+          "sha256": "bb427ba5719a790650e1fff61ae179757df52e70d002c87011505a6ea1b8d486"
+        },
+        {
+          "command": "npu-smi info -t usages",
+          "file": "a3-usages.txt",
+          "sha256": "bd007f986180bba6e5d67637d3174c19c479226c6b0142e53e6deb7438d0c09c"
+        }
+      ]
+    },
+    {
+      "hardware": "A5",
+      "host": "141.61.33.23",
+      "npu_smi_version": "26.2.0.b007",
+      "commands": [
+        {
+          "command": "npu-smi info",
+          "file": "a5-23.txt",
+          "sha256": "0542255686931024c13c66ed754ba92c1d8b05e7cfccac5b5d9fc3393ad31dbd"
+        },
+        {
+          "command": "npu-smi info -t usages",
+          "file": "a5-usages.txt",
+          "sha256": "919848546a92c77515fbee519d128b01a35b27b9c04afbbc388ff9bae21ec30c"
+        }
+      ]
+    }
+  ]
+}

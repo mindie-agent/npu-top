@@ -8,6 +8,7 @@ on disk to interpret Ascend devices. The layouts handled here are:
   rows, as printed by 910B-class and A3/910C-class drivers);
 * the process table in both the ``NPU Chip | PID | Name | Memory`` and the
   older flat ``NPU | PID | Name | Memory`` layouts;
+* the single-ID four-column Ascend950/A5 table and chipless process rows;
 * the ``key : value`` blocks printed by ``npu-smi info -t usages``.
 
 Everything returned here is *observed* device state at collection time.
@@ -16,6 +17,8 @@ Everything returned here is *observed* device state at collection time.
 from __future__ import annotations
 
 import re
+
+from .npu_single_id import parse_single_id_table
 from typing import Any
 
 
@@ -77,6 +80,9 @@ def _finalize_device(device: dict[str, Any]) -> None:
 
 
 def parse_npu_smi_info(text: str) -> dict[str, Any]:
+    single_id = parse_single_id_table(text)
+    if single_id is not None:
+        return single_id
     devices: list[dict[str, Any]] = []
     by_id: dict[int, dict[str, Any]] = {}
     current: dict[str, Any] | None = None
@@ -218,5 +224,7 @@ def apply_usage_overrides(devices: list[dict[str, Any]], usages: dict[int, dict[
 
 def parse_npu(info: str, usages: str = "") -> dict[str, Any]:
     parsed = parse_npu_smi_info(info)
+    if not parsed["devices"]:
+        raise ValueError("npu-smi output contained no recognizable NPU devices")
     apply_usage_overrides(parsed["devices"], parse_npu_smi_usages(usages))
     return parsed
