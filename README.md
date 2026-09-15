@@ -187,3 +187,32 @@ GitHub Actions 在 Python 3.11/3.12 上对**已安装的包**跑后端测试，�
 ## License
 
 MIT，见 [LICENSE](LICENSE)。
+
+## Bounded history storage
+
+History stores 15-minute host/device summaries (weighted averages with per-metric
+counts, sample counts, disk peaks and maximum device count). Process, mount and
+container details remain in current snapshots only. Failure history is replaced
+by the latest server error.
+
+`NFM_SQLITE_MAX_MB` defaults to 1024 (minimum 16): SQLite max_page_count caps the
+main database. WAL, shared memory and service logs are additional space; WAL
+checkpointing is automatic and retained WAL size is limited to 8 MiB after reset.
+History queries permit two concurrent executions with a three-second SQL budget.
+Hourly maintenance removes data older than `NFM_RETENTION_DAYS` (default 90) in
+small batches and drops the oldest summary days at 85% capacity. Freed database
+pages are reused. If the hard cap is reached, the history sample is skipped and
+maintenance reclaims space; current in-memory observations remain available.
+
+Before starting this version on an old database, stop the monitor and run:
+
+```sh
+python3 scripts/migrate-history.py data/monitor.sqlite3 --max-mb 1024
+```
+
+Migration streams 250 samples at a time into a new database, checks sample counts,
+integrity and foreign keys, then swaps files. It preserves `monitor.sqlite3.legacy`
+for rollback until service/API validation succeeds. Remove that legacy file only
+after validation to release disk space. A pre-existing migration staging or backup
+file stops migration so interrupted work can be inspected. Never run migration
+while a service or another database writer is active.

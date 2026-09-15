@@ -19,7 +19,7 @@ from vaws_diagnostics import get_recorder, wrap_context
 def main() -> None:
     settings = Settings.load()
     settings.prepare()
-    db = Database(settings.state_dir / "monitor.sqlite3")
+    db = Database(settings.state_dir / "monitor.sqlite3", settings.sqlite_max_mb * 1024 * 1024)
     db.initialize()
     adapter = DeviceAdapter.from_settings(settings)
     adapter.ensure_key()

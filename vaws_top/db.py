@@ -4,6 +4,9 @@ import json
 import sqlite3
 import threading
 import time
+import logging
+import math
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -23,48 +26,50 @@ CREATE TABLE IF NOT EXISTS servers (
   last_error TEXT,
   UNIQUE(host, port, username)
 );
-CREATE TABLE IF NOT EXISTS host_samples (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
-  collected_at INTEGER NOT NULL,
-  duration_ms INTEGER,
-  cpu_percent REAL,
-  load1 REAL,
-  load5 REAL,
-  load15 REAL,
-  memory_used_bytes INTEGER,
-  memory_total_bytes INTEGER,
-  swap_used_bytes INTEGER,
-  swap_total_bytes INTEGER,
-  npu_util_percent REAL,
-  hbm_used_mb INTEGER,
-  hbm_total_mb INTEGER,
-  npu_count INTEGER NOT NULL DEFAULT 0,
-  busy_npu_count INTEGER NOT NULL DEFAULT 0,
-  docker_running INTEGER,
-  disk_max_percent REAL,
-  payload_json TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_host_samples_server_time
-  ON host_samples(server_id, collected_at DESC);
-CREATE INDEX IF NOT EXISTS idx_host_samples_time
-  ON host_samples(collected_at);
-CREATE TABLE IF NOT EXISTS collection_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
-  collected_at INTEGER NOT NULL,
-  status TEXT NOT NULL,
-  duration_ms INTEGER,
-  error TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_collection_events_server_time
-  ON collection_events(server_id, collected_at DESC);
 """
 
 
+HOST_METRICS = ("cpu_percent", "npu_util_percent", "memory_percent", "hbm_percent", "busy_npu_count")
+DEVICE_METRICS = ("utilization_percent", "hbm_percent", "busy_percent")
+
+
+def rollup_schema(table: str, metrics: tuple[str, ...], device: bool = False) -> str:
+    columns = ",".join(f"{key}_sum REAL NOT NULL DEFAULT 0,{key}_count INTEGER NOT NULL DEFAULT 0" for key in metrics)
+    identity = "npu_id INTEGER NOT NULL,name TEXT," if device else "disk_max_percent REAL,npu_count INTEGER,"
+    key = "server_id,bucket,npu_id" if device else "server_id,bucket"
+    return f"""CREATE TABLE IF NOT EXISTS {table} (
+        server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+        bucket INTEGER NOT NULL,last_collected_at INTEGER NOT NULL,sample_count INTEGER NOT NULL,
+        {identity}{columns},PRIMARY KEY ({key}));
+        CREATE INDEX IF NOT EXISTS idx_{table}_bucket ON {table}(bucket);"""
+
+SCHEMA += rollup_schema("host_rollups", HOST_METRICS) + rollup_schema("device_rollups", DEVICE_METRICS, True)
+
+
+def bounded_history(method):
+    @wraps(method)
+    def query(self, *args, **kwargs):
+        if not self._history_slots.acquire(blocking=False):
+            raise sqlite3.OperationalError("History queries busy; retry later")
+        connection = None
+        try:
+            connection = self.connection()
+            deadline = time.monotonic() + 3
+            connection.set_progress_handler(lambda: int(time.monotonic() > deadline), 10000)
+            return method(self, *args, **kwargs)
+        finally:
+            if connection is not None:
+                connection.set_progress_handler(None, 0)
+            self._history_slots.release()
+    return query
+
+
 class Database:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, max_bytes: int = 1024 * 1024 * 1024) -> None:
         self.path = path
+        self.max_bytes = max_bytes
+        self._write_lock = threading.RLock()
+        self._history_slots = threading.BoundedSemaphore(2)
         self._local = threading.local()
 
     def connection(self) -> sqlite3.Connection:
@@ -74,12 +79,19 @@ class Database:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA foreign_keys=ON")
+            page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+            connection.execute(f"PRAGMA max_page_count={max(1, self.max_bytes // page_size)}")
+            connection.execute("PRAGMA journal_size_limit=8388608")
+            connection.execute("PRAGMA cache_size=-2048")
             connection.execute("PRAGMA busy_timeout=15000")
             self._local.connection = connection
         return connection
 
     def initialize(self) -> None:
         connection = self.connection()
+        legacy = connection.execute("SELECT 1 FROM sqlite_master WHERE name='host_samples'").fetchone()
+        if legacy:
+            raise RuntimeError("Legacy history requires offline migrate-history.py before startup")
         connection.executescript(SCHEMA)
         connection.execute("PRAGMA optimize")
         connection.commit()
@@ -159,143 +171,143 @@ class Database:
         self.connection().commit()
         return cursor.rowcount > 0
 
+
+    @staticmethod
+    def _percent(used: Any, total: Any) -> float | None:
+        return used * 100.0 / total if used is not None and total and total > 0 else None
+
+    def _rollup(self, table: str, server_id: str, collected: int, values: dict[str, Any],
+                metrics: tuple[str, ...], device: dict[str, Any] | None = None) -> None:
+        bucket = collected // 900 * 900
+        fields = ["server_id", "bucket", "last_collected_at", "sample_count"]
+        args: list[Any] = [server_id, bucket, collected, 1]
+        updates = ["last_collected_at=MAX(last_collected_at,excluded.last_collected_at)",
+                   "sample_count=sample_count+excluded.sample_count"]
+        if device is not None:
+            fields += ["npu_id", "name"]
+            args += [device["npu_id"], device.get("name", "Ascend NPU")]
+            updates += ["name=excluded.name"]
+        else:
+            for key in ("disk_max_percent", "npu_count"):
+                fields.append(key)
+                args.append(values.get(key))
+                updates.append(f"{key}=CASE WHEN {key} IS NULL THEN excluded.{key} WHEN excluded.{key} IS NULL THEN {key} ELSE MAX({key},excluded.{key}) END")
+        for key in metrics:
+            value = values.get(key)
+            valid = isinstance(value, (int, float)) and math.isfinite(value)
+            fields += [key + "_sum", key + "_count"]
+            args += [value if valid else 0, int(valid)]
+            updates += [f"{key}_{suffix}={key}_{suffix}+excluded.{key}_{suffix}" for suffix in ("sum", "count")]
+        conflict = "server_id,bucket,npu_id" if device is not None else "server_id,bucket"
+        self.connection().execute(
+            f"INSERT INTO {table} ({','.join(fields)}) VALUES ({','.join('?' for _ in args)}) "
+            f"ON CONFLICT({conflict}) DO UPDATE SET {','.join(updates)}", args)
+
+    def aggregate_snapshot(self, server_id: str, snapshot: dict[str, Any]) -> None:
+        summary = snapshot.get("summary", {})
+        values = dict(summary)
+        values["memory_percent"] = self._percent(summary.get("memory_used_bytes"), summary.get("memory_total_bytes"))
+        values["hbm_percent"] = self._percent(summary.get("hbm_used_mb"), summary.get("hbm_total_mb"))
+        collected = int(snapshot["collected_at"])
+        self._rollup("host_rollups", server_id, collected, values, HOST_METRICS)
+        for device in snapshot.get("devices", []):
+            hbm = device.get("hbm") or {}
+            self._rollup("device_rollups", server_id, collected, {
+                "utilization_percent": device.get("aicore_percent"),
+                "hbm_percent": self._percent(hbm.get("used_mb"), hbm.get("total_mb")),
+                "busy_percent": 100 if device.get("busy") else 0,
+            }, DEVICE_METRICS, device)
+
     def record_success(self, server_id: str, snapshot: dict[str, Any], persist_sample: bool) -> None:
-        now = int(snapshot["collected_at"])
-        connection = self.connection()
-        connection.execute(
-            "UPDATE servers SET last_seen_at=?, last_error=NULL, updated_at=? WHERE id=?",
-            (now, now, server_id),
-        )
-        if persist_sample:
-            connection.execute(
-                "INSERT INTO collection_events(server_id,collected_at,status,duration_ms) VALUES(?,?,?,?)",
-                (server_id, now, "ok", snapshot.get("duration_ms")),
-            )
-            summary = snapshot.get("summary", {})
-            connection.execute(
-                """
-                INSERT INTO host_samples(
-                  server_id,collected_at,duration_ms,cpu_percent,load1,load5,load15,
-                  memory_used_bytes,memory_total_bytes,swap_used_bytes,swap_total_bytes,
-                  npu_util_percent,hbm_used_mb,hbm_total_mb,npu_count,busy_npu_count,
-                  docker_running,disk_max_percent,payload_json
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    server_id, now, snapshot.get("duration_ms"), summary.get("cpu_percent"),
-                    summary.get("load1"), summary.get("load5"), summary.get("load15"),
-                    summary.get("memory_used_bytes"), summary.get("memory_total_bytes"),
-                    summary.get("swap_used_bytes"), summary.get("swap_total_bytes"),
-                    summary.get("npu_util_percent"), summary.get("hbm_used_mb"),
-                    summary.get("hbm_total_mb"), summary.get("npu_count", 0),
-                    summary.get("busy_npu_count", 0), summary.get("docker_running"),
-                    summary.get("disk_max_percent"), json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")),
-                ),
-            )
-        connection.commit()
+        with self._write_lock:
+            connection = self.connection()
+            try:
+                with connection:
+                    now = int(snapshot["collected_at"])
+                    connection.execute("UPDATE servers SET last_seen_at=?,last_error=NULL,updated_at=? WHERE id=?", (now, now, server_id))
+                    if persist_sample:
+                        self.aggregate_snapshot(server_id, snapshot)
+            except sqlite3.OperationalError as exc:
+                if getattr(exc, "sqlite_errorcode", None) != sqlite3.SQLITE_FULL:
+                    raise
+                logging.error("History capacity exhausted; skipping sample and reclaiming oldest summaries")
+                self.prune(90, pressure=True)
 
     def record_failure(self, server_id: str, error: str, duration_ms: float | None, persist_event: bool = True) -> None:
-        now = int(time.time())
-        safe_error = error[-1200:]
-        connection = self.connection()
-        connection.execute(
-            "UPDATE servers SET last_error=?, updated_at=? WHERE id=?",
-            (safe_error, now, server_id),
-        )
-        if persist_event:
-            connection.execute(
-                "INSERT INTO collection_events(server_id,collected_at,status,duration_ms,error) VALUES(?,?,?,?,?)",
-                (server_id, now, "failed", duration_ms, safe_error),
-            )
-        connection.commit()
+        # Only current failure state is needed by the UI; no unbounded event log.
+        with self.connection() as connection:
+            connection.execute("UPDATE servers SET last_error=?,updated_at=? WHERE id=?", (error[-1200:], int(time.time()), server_id))
 
+
+    @staticmethod
+    def _averages(metrics: tuple[str, ...]) -> str:
+        return ",".join(f"SUM({key}_sum)*1.0/NULLIF(SUM({key}_count),0) AS {key}" for key in metrics)
+
+    @bounded_history
     def history(self, server_id: str | None, since: int, bucket_seconds: int) -> list[dict[str, Any]]:
-        where = "collected_at >= ?"
-        params: list[Any] = [since]
+        bucket_seconds = max(900, bucket_seconds)
+        where = "bucket >= ?"
+        params: list[Any] = [since // 900 * 900]
         if server_id:
-            where += " AND server_id = ?"
+            where += " AND server_id=?"
             params.append(server_id)
-        rows = self.connection().execute(
-            f"""
-            SELECT (collected_at / ?) * ? AS bucket,
-                   AVG(cpu_percent) AS cpu_percent,
-                   AVG(npu_util_percent) AS npu_util_percent,
-                   AVG(CASE WHEN memory_total_bytes > 0 THEN memory_used_bytes * 100.0 / memory_total_bytes END) AS memory_percent,
-                   AVG(CASE WHEN hbm_total_mb > 0 THEN hbm_used_mb * 100.0 / hbm_total_mb END) AS hbm_percent,
-                   MAX(disk_max_percent) AS disk_max_percent,
-                   AVG(busy_npu_count) AS busy_npu_count,
-                   MAX(npu_count) AS npu_count
-            FROM host_samples WHERE {where}
-            GROUP BY bucket ORDER BY bucket
-            """,
-            [bucket_seconds, bucket_seconds, *params],
-        ).fetchall()
+        rows = self.connection().execute(f"""
+            SELECT (bucket / ?) * ? AS bucket,{self._averages(HOST_METRICS)},
+                   MAX(disk_max_percent) AS disk_max_percent,MAX(npu_count) AS npu_count
+            FROM host_rollups WHERE {where} GROUP BY 1 ORDER BY 1
+        """, [bucket_seconds, bucket_seconds, *params]).fetchall()
         return [dict(row) for row in rows]
 
-    def history_heatmap(
-        self,
-        server_id: str,
-        since: int,
-        bucket_seconds: int = 7200,
-        timezone_offset_seconds: int = 0,
-    ) -> list[dict[str, Any]]:
+    @bounded_history
+    def history_heatmap(self, server_id: str, since: int, bucket_seconds: int = 7200,
+                        timezone_offset_seconds: int = 0) -> list[dict[str, Any]]:
         offset = max(-50400, min(50400, int(timezone_offset_seconds)))
         bucket = max(3600, int(bucket_seconds))
-        bucket_expression = "((collected_at + ?) / ?) * ? - ?"
-        summary_rows = self.connection().execute(
-            f"""
-            SELECT {bucket_expression} AS bucket,
-                   COUNT(*) AS sample_count,
-                   AVG(cpu_percent) AS cpu_percent,
-                   AVG(npu_util_percent) AS npu_util_percent,
-                   AVG(CASE WHEN memory_total_bytes > 0 THEN memory_used_bytes * 100.0 / memory_total_bytes END) AS memory_percent,
-                   AVG(CASE WHEN hbm_total_mb > 0 THEN hbm_used_mb * 100.0 / hbm_total_mb END) AS hbm_percent,
-                   MAX(disk_max_percent) AS disk_max_percent
-            FROM host_samples
-            WHERE server_id = ? AND collected_at >= ?
-            GROUP BY bucket ORDER BY bucket
-            """,
-            (offset, bucket, bucket, offset, server_id, since),
-        ).fetchall()
-        points = {int(row["bucket"]): {**dict(row), "devices": []} for row in summary_rows}
-        if not points:
-            return []
-
-        device_rows = self.connection().execute(
-            f"""
-            SELECT {bucket_expression} AS bucket,
-                   CAST(json_extract(device.value, '$.npu_id') AS INTEGER) AS npu_id,
-                   MAX(COALESCE(json_extract(device.value, '$.name'), 'Ascend NPU')) AS name,
-                   AVG(CAST(json_extract(device.value, '$.aicore_percent') AS REAL)) AS utilization_percent,
-                   AVG(CASE
-                       WHEN CAST(json_extract(device.value, '$.hbm.total_mb') AS REAL) > 0
-                       THEN CAST(json_extract(device.value, '$.hbm.used_mb') AS REAL) * 100.0 /
-                            CAST(json_extract(device.value, '$.hbm.total_mb') AS REAL)
-                   END) AS hbm_percent,
-                   AVG(CASE WHEN json_extract(device.value, '$.busy') THEN 100.0 ELSE 0.0 END) AS busy_percent
-            FROM host_samples
-            JOIN json_each(host_samples.payload_json, '$.devices') AS device
-            WHERE server_id = ? AND collected_at >= ?
-            GROUP BY bucket, npu_id ORDER BY bucket, npu_id
-            """,
-            (offset, bucket, bucket, offset, server_id, since),
-        ).fetchall()
-        for row in device_rows:
-            point = points.get(int(row["bucket"]))
-            if point is not None:
-                point["devices"].append({key: row[key] for key in row.keys() if key != "bucket"})
-        return [points[key] for key in sorted(points)]
+        params = (offset, bucket, bucket, offset, server_id, since // 900 * 900)
+        expression = "((bucket + ?) / ?) * ? - ?"
+        rows = self.connection().execute(f"""
+            SELECT {expression} AS time_bucket,SUM(sample_count) AS sample_count,
+                   {self._averages(HOST_METRICS)},MAX(disk_max_percent) AS disk_max_percent
+            FROM host_rollups WHERE server_id=? AND bucket>=? GROUP BY 1 ORDER BY 1
+        """, params).fetchall()
+        points = {row["time_bucket"]: {**dict(row), "bucket": row["time_bucket"], "devices": []} for row in rows}
+        rows = self.connection().execute(f"""
+            SELECT {expression} AS time_bucket,npu_id,MAX(name) AS name,{self._averages(DEVICE_METRICS)}
+            FROM device_rollups WHERE server_id=? AND bucket>=? GROUP BY 1,npu_id ORDER BY 1,npu_id
+        """, params).fetchall()
+        for row in rows:
+            if row["time_bucket"] in points:
+                points[row["time_bucket"]]["devices"].append({key: row[key] for key in row.keys() if key != "time_bucket"})
+        return list(points.values())
 
     def latest_persisted(self) -> dict[str, int]:
-        rows = self.connection().execute(
-            "SELECT server_id, MAX(collected_at) AS collected_at FROM host_samples GROUP BY server_id"
-        ).fetchall()
-        return {str(row["server_id"]): int(row["collected_at"]) for row in rows if row["collected_at"]}
+        rows = self.connection().execute("SELECT server_id,MAX(last_collected_at) FROM host_rollups GROUP BY server_id").fetchall()
+        return {row[0]: row[1] for row in rows}
 
-    def prune(self, retention_days: int) -> None:
-        cutoff = int(time.time()) - retention_days * 86400
-        connection = self.connection()
-        connection.execute("DELETE FROM host_samples WHERE collected_at < ?", (cutoff,))
-        connection.execute("DELETE FROM collection_events WHERE collected_at < ?", (cutoff,))
-        connection.commit()
-        connection.execute("PRAGMA optimize")
+    def prune(self, retention_days: int, pressure: bool = False) -> None:
+        with self._write_lock:
+            connection = self.connection()
+            cutoff = int(time.time()) - retention_days * 86400
+            # Small transactions keep WAL and write-lock duration bounded.
+            for table in ("device_rollups", "host_rollups"):
+                while True:
+                    with connection:
+                        cursor = connection.execute(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE bucket<? LIMIT 1000)", (cutoff,))
+                    if cursor.rowcount < 1000:
+                        break
+            page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+            target = self.max_bytes * (0.75 if pressure else 0.85)
+            while True:
+                used = (connection.execute("PRAGMA page_count").fetchone()[0] - connection.execute("PRAGMA freelist_count").fetchone()[0]) * page_size
+                if used < target:
+                    break
+                oldest = connection.execute("SELECT MIN(bucket) FROM host_rollups").fetchone()[0]
+                if oldest is None:
+                    break
+                for table in ("device_rollups", "host_rollups"):
+                    while True:
+                        with connection:
+                            cursor = connection.execute(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE bucket<? LIMIT 1000)", (oldest + 86400,))
+                        if cursor.rowcount < 1000:
+                            break
+            connection.execute("PRAGMA wal_checkpoint(PASSIVE)")

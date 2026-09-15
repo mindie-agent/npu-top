@@ -45,6 +45,8 @@ class Settings:
     host_pool_files: tuple[Path, ...] = ()
     bootstrap_command: str | None = None
 
+    sqlite_max_mb: int = 1024
+
     @classmethod
     def load(cls) -> "Settings":
         state_dir = Path(os.environ.get("NFM_STATE_DIR", Path.cwd() / "data")).expanduser().resolve()
@@ -60,6 +62,7 @@ class Settings:
             retention_days=_number("NFM_RETENTION_DAYS", 90, 1),
             max_workers=_number("NFM_MAX_WORKERS", 8, 1),
             ssh_timeout=_number("NFM_SSH_TIMEOUT_SECONDS", 12, 2),
+            sqlite_max_mb=_number("NFM_SQLITE_MAX_MB", 1024, 16),
             hbm_busy_threshold_mb=_number("NFM_HBM_BUSY_THRESHOLD_MB", 8192, 1),
             inventory_files=_paths("NFM_INVENTORY_FILES"),
             host_pool_files=_paths("NFM_HOST_POOL_FILES"),

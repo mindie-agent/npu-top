@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -178,8 +180,13 @@ class AdaptiveScheduler:
                     self._cycle_duration_ms = round((time.monotonic() - started) * 1000)
                 next_cycle = time.monotonic() + self.effective_interval()
             if time.monotonic() >= prune_at:
-                self.db.prune(self.settings.retention_days)
-                prune_at = time.monotonic() + 86400
+                try:
+                    self.db.prune(self.settings.retention_days)
+                except sqlite3.OperationalError as exc:
+                    if getattr(exc, "sqlite_errorcode", None) not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_FULL):
+                        raise
+                    logging.exception("History maintenance busy or full; retrying next hour")
+                prune_at = time.monotonic() + 3600
 
     def _collect_cycle(self, targets: set[str], force_infrastructure: set[str] | None = None) -> None:
         force_infrastructure = force_infrastructure or set()

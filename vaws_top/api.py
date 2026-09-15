@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import re
+import sqlite3
 import time
 import uuid
 from http import HTTPStatus
@@ -26,7 +27,7 @@ from vaws_diagnostics import get_recorder
 
 
 RANGES = {
-    "1h": (3600, 60), "6h": (21600, 300), "24h": (86400, 600),
+    "1h": (3600, 900), "6h": (21600, 900), "24h": (86400, 900),
     "7d": (604800, 3600), "30d": (2592000, 14400), "90d": (7776000, 43200),
 }
 
@@ -207,6 +208,12 @@ class Handler(BaseHTTPRequestHandler):
 
     @observed("top.http.get", level="DEBUG")
     def do_GET(self) -> None:  # noqa: N802
+        try:
+            self._get()
+        except sqlite3.OperationalError:
+            self.json_response({"error": "Storage busy; retry later"}, HTTPStatus.SERVICE_UNAVAILABLE)
+
+    def _get(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
             runtime = self.app.scheduler.runtime_state()
