@@ -9,9 +9,9 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
-from vaws_top.device_adapter import DeviceAdapter
-from vaws_top.inventory import ExternalKeyBootstrap
-from vaws_top.probe import (
+from npu_top.device_adapter import DeviceAdapter
+from npu_top.inventory import ExternalKeyBootstrap
+from npu_top.probe import (
     attach_npu_telemetry,
     attach_process_details,
     build_process_detail_script,
@@ -25,8 +25,8 @@ from vaws_top.probe import (
     parse_process_details,
     split_sections,
 )
-from vaws_top.settings import Settings
-from vaws_top.ssh_access import SshAccess
+from npu_top.settings import Settings
+from npu_top.ssh_access import SshAccess
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -164,7 +164,7 @@ class ProbeTests(unittest.TestCase):
                 subprocess.CompletedProcess(["whoami"], 0, "DOMAIN\\monitor\n", ""),
                 subprocess.CompletedProcess(["icacls"], 0, "processed", ""),
             ]
-            with mock.patch("vaws_top.ssh_access.subprocess.run", side_effect=responses) as run:
+            with mock.patch("npu_top.ssh_access.subprocess.run", side_effect=responses) as run:
                 ssh._secure_key_permissions()
                 ssh._secure_key_permissions()
             self.assertEqual(run.call_count, 2)
@@ -211,7 +211,7 @@ class ProbeTests(unittest.TestCase):
                 mock.patch.object(ssh, "preflight", return_value={"ok": True}),
                 mock.patch.object(ssh, "key_auth_works", side_effect=[False, True]),
                 mock.patch.object(ssh, "install_key_with_default_identity", return_value=False),
-                mock.patch("vaws_top.inventory.subprocess.run", return_value=completed) as run,
+                mock.patch("npu_top.inventory.subprocess.run", return_value=completed) as run,
             ):
                 result = adapter.bootstrap_with_passwords(server, ["one-time"])
             self.assertEqual(result, {"ok": True, "method": "external-bootstrap", "attempts": 1})

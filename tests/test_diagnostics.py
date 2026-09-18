@@ -8,8 +8,8 @@ import time
 from types import SimpleNamespace
 
 import pytest
-from vaws_diagnostics import configure
-from vaws_top.scheduler import AdaptiveScheduler
+from mindie_diagnostics import configure
+from npu_top.scheduler import AdaptiveScheduler
 
 
 def records(root):
@@ -20,8 +20,8 @@ def records(root):
 @pytest.fixture
 def diagnostic_root(tmp_path, monkeypatch):
     root = tmp_path / "diagnostics"
-    monkeypatch.setenv("VAWS_DIAGNOSTICS_ROOT", str(root))
-    rec = configure("vaws-top", root=root, level="DEBUG")
+    monkeypatch.setenv("MINDIE_DIAGNOSTICS_ROOT", str(root))
+    rec = configure("npu-top", root=root, level="DEBUG")
     yield root
     rec.close()
 
@@ -43,7 +43,7 @@ class DB:
 
 
 def test_collector_death_notifies_waiters_and_health_is_degraded(diagnostic_root):
-    from vaws_top.api import App, AppServer
+    from npu_top.api import App, AppServer
     scheduler = AdaptiveScheduler(settings(), DB(), object())
     scheduler.start()
     scheduler._thread.join(3)
@@ -101,7 +101,7 @@ def test_failed_probe_records_actual_worker_duration(diagnostic_root):
 
 
 def test_mcp_caught_fault_keeps_protocol_and_diagnostic(diagnostic_root):
-    from vaws_top.mcp import handle_request
+    from npu_top.mcp import handle_request
     class Client:
         def servers(self):
             raise OSError("API down")
@@ -113,7 +113,7 @@ def test_mcp_caught_fault_keeps_protocol_and_diagnostic(diagnostic_root):
 
 
 def test_public_cli_local_help_and_diagnostics(diagnostic_root, capsys):
-    from vaws_top.cli import main
+    from npu_top.cli import main
     with pytest.raises(SystemExit) as result:
         main(["--help"])
     assert result.value.code == 0
@@ -125,7 +125,7 @@ def test_public_cli_local_help_and_diagnostics(diagnostic_root, capsys):
 
 
 def test_diagnostics_with_global_flags_does_not_contact_monitor(diagnostic_root, monkeypatch, capsys):
-    from vaws_top import cli
+    from npu_top import cli
     def forbidden(*args, **kwargs):
         raise AssertionError("diagnostic export must not initialize a monitor client")
     monkeypatch.setattr(cli, "VawsTopClient", forbidden)
@@ -134,8 +134,8 @@ def test_diagnostics_with_global_flags_does_not_contact_monitor(diagnostic_root,
 
 
 def test_only_actual_argparse_errors_are_classified_caller(diagnostic_root):
-    from vaws_top.cli import main
-    from vaws_top.observability import observed
+    from npu_top.cli import main
+    from npu_top.observability import observed
     with pytest.raises(SystemExit) as caught:
         main(["unknown-command"])
     assert caught.value.code == 2
@@ -153,13 +153,13 @@ def test_only_actual_argparse_errors_are_classified_caller(diagnostic_root):
 def test_public_bundle_retains_failure_classification_and_numeric_code(
     diagnostic_root, tmp_path, classification, error_code
 ):
-    from vaws_diagnostics import get_recorder
+    from mindie_diagnostics import get_recorder
 
-    with get_recorder("vaws-top").operation("projection.fixture") as operation:
+    with get_recorder("npu-top").operation("projection.fixture") as operation:
         operation.fail("argument_validation", classification=classification, error_code=error_code)
     output = tmp_path / "public-bundle.json"
     proc = subprocess.run(
-        [sys.executable, "-m", "vaws_top", "diagnostics", "bundle",
+        [sys.executable, "-m", "npu_top", "diagnostics", "bundle",
          "--root", str(diagnostic_root), "--operation-id", operation.summary()["operation_id"],
          "--output", str(output)],
         capture_output=True, text=True, encoding="utf-8", timeout=15,

@@ -1,10 +1,10 @@
 # Agent CLI 与 MCP
 
-`vaws-top` 将 Agent 查询统一交给本机 `vaws-top serve` 进程。默认 `cache` 模式立即读取内存快照，不建立 SSH；显式 `live` 模式由采集器发起一次集中探查并等待新快照。Agent 无需自行拼接 SSH 命令，也不会接触远程密码或监控密钥。
+`npu-top` 将 Agent 查询统一交给本机 `npu-top serve` 进程。默认 `cache` 模式立即读取内存快照，不建立 SSH；显式 `live` 模式由采集器发起一次集中探查并等待新快照。Agent 无需自行拼接 SSH 命令，也不会接触远程密码或监控密钥。
 
 ## 只观测，不分配
 
-vaws-top 是**观测面**，不是设备分配权威。每个响应描述的都是采集器在 `observed_at` 那一刻看到的主机状态，随时可能过期。哪些 NPU 可以被使用，由宿主机侧的 NPU 协调器队列决定；vaws-top 不知道也不表达任何预约、租约或授权。
+npu-top 是**观测面**，不是设备分配权威。每个响应描述的都是采集器在 `observed_at` 那一刻看到的主机状态，随时可能过期。哪些 NPU 可以被使用，由宿主机侧的 NPU 协调器队列决定；npu-top 不知道也不表达任何预约、租约或授权。
 
 因此所有 `/api/agent/*` 响应、CLI JSON 和 MCP `structuredContent` 都带有同一个 `observation` 信封：
 
@@ -19,20 +19,20 @@ vaws-top 是**观测面**，不是设备分配权威。每个响应描述的都�
 }
 ```
 
-`capacity` / `find_npu_capacity` 的信封 `kind` 为 `observed_availability`，其 `observed_at` 是所依赖的最旧快照时间；每个候选还带各自的 `observed_at`。`idle_npu_count`、`busy` 这类字段天然容易被当成"可分配"，请把它们理解为"上次观测到空闲/繁忙"，然后到协调器申请设备。HTTP 响应额外携带 `X-VAWS-Top-Contract: observation-only` 头，`/api/health` 返回 `contract: observation-only`。
+`capacity` / `find_npu_capacity` 的信封 `kind` 为 `observed_availability`，其 `observed_at` 是所依赖的最旧快照时间；每个候选还带各自的 `observed_at`。`idle_npu_count`、`busy` 这类字段天然容易被当成"可分配"，请把它们理解为"上次观测到空闲/繁忙"，然后到协调器申请设备。HTTP 响应额外携带 `X-MindIE-Top-Contract: observation-only` 头，`/api/health` 返回 `contract: observation-only`。
 
 ## CLI
 
 ```bash
-vaws-top servers
-vaws-top npu 192.0.2.21
-vaws-top npu 192.0.2.21 --live
-vaws-top npu 192.0.2.21 --ultra-compact
-vaws-top --json npu 192.0.2.21 --processes
-vaws-top status 192.0.2.21
-vaws-top status 192.0.2.21 --cache
-vaws-top mounts 192.0.2.21 --live
-vaws-top capacity --min-idle 4 --max-age 180 --tag A3
+npu-top servers
+npu-top npu 192.0.2.21
+npu-top npu 192.0.2.21 --live
+npu-top npu 192.0.2.21 --ultra-compact
+npu-top --json npu 192.0.2.21 --processes
+npu-top status 192.0.2.21
+npu-top status 192.0.2.21 --cache
+npu-top mounts 192.0.2.21 --live
+npu-top capacity --min-idle 4 --max-age 180 --tag A3
 ```
 
 默认输出只保留状态、缓存年龄、忙闲卡数、AICore、HBM、进程数和归属：
@@ -47,7 +47,7 @@ vaws-top capacity --min-idle 4 --max-age 180 --tag A3
 
 `status` 汇总 NPU、CPU、内存、磁盘、Docker、占用进程/容器及可能的工号或姓名缩写；`mounts` 返回挂载源、文件系统、容量，并标出可能存放模型权重的挂载点；`capacity` 从新鲜缓存中筛选观测到满足空闲 NPU 数量和标签的机器，低优先级服务器排在最后。
 
-默认 API 是 `http://127.0.0.1:8788`，可通过 `--url` 或 `VAWS_TOP_URL` 修改为其他回环端口。为避免误将无认证接口暴露到网络，非回环 URL 默认拒绝。
+默认 API 是 `http://127.0.0.1:8788`，可通过 `--url` 或 `MINDIE_TOP_URL` 修改为其他回环端口。为避免误将无认证接口暴露到网络，非回环 URL 默认拒绝。
 
 ## MCP
 
@@ -56,10 +56,10 @@ MCP server 使用标准输入输出传输，后端仍通过同一回环缓存 AP
 ```json
 {
   "mcpServers": {
-    "vaws-top": {
-      "command": "vaws-top",
+    "npu-top": {
+      "command": "npu-top",
       "args": ["mcp"],
-      "env": { "VAWS_TOP_URL": "http://127.0.0.1:8788" }
+      "env": { "MINDIE_TOP_URL": "http://127.0.0.1:8788" }
     }
   }
 }

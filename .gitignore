@@ -12,4 +12,4 @@ build/
 .venv-wheel/
 .env
 .env.local
-vaws_top/static/
+npu_top/static/

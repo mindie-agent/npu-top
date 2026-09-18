@@ -67,7 +67,7 @@ jobs:
       - name: Confirm frontend assets are in the wheel
         run: |
           unzip -l dist/*.whl
-          unzip -l dist/*.whl | grep -F 'vaws_top/static/index.html'
+          unzip -l dist/*.whl | grep -F 'npu_top/static/index.html'
       - name: Install the wheel and smoke the console script
         env:
           HOME: ${{ runner.temp }}/empty-home
@@ -76,6 +76,6 @@ jobs:
           cd "${{ runner.temp }}"
           uv venv .venv-wheel
           VIRTUAL_ENV="$PWD/.venv-wheel" uv pip install "${{ github.workspace }}"/dist/*.whl
-          .venv-wheel/bin/python -c "import vaws_top, pathlib; p=pathlib.Path(vaws_top.__file__).resolve(); assert 'site-packages' in p.parts, p"
-          .venv-wheel/bin/vaws-top --help
-          .venv-wheel/bin/python -c "from vaws_top.static_files import require_static; print(require_static() / 'index.html')"
+          .venv-wheel/bin/python -c "import npu_top, pathlib; p=pathlib.Path(npu_top.__file__).resolve(); assert 'site-packages' in p.parts, p"
+          .venv-wheel/bin/npu-top --help
+          .venv-wheel/bin/python -c "from npu_top.static_files import require_static; print(require_static() / 'index.html')"

@@ -1,5 +1,5 @@
 {
-  "name": "vaws-top",
+  "name": "npu-top",
   "version": "0.1.6",
   "private": true,
   "engines": {
@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "lint": "eslint . --ignore-pattern vaws_top/static --ignore-pattern dist"
+    "lint": "eslint . --ignore-pattern npu_top/static --ignore-pattern dist"
   },
   "dependencies": {
     "react": "19.2.8",

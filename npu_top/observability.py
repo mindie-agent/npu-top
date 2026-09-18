@@ -2,7 +2,7 @@
 from contextvars import ContextVar
 from functools import wraps
 
-from vaws_diagnostics import get_recorder
+from mindie_diagnostics import get_recorder
 
 _ACTIVE = ContextVar("top_diagnostic_operation", default=None)
 
@@ -25,7 +25,7 @@ def observed(name, *, level="INFO"):
     def decorate(function):
         @wraps(function)
         def call(*args, **kwargs):
-            with get_recorder("vaws-top").operation(name, level=level) as operation:
+            with get_recorder("npu-top").operation(name, level=level) as operation:
                 token = _ACTIVE.set(operation)
                 try:
                     result = function(*args, **kwargs)

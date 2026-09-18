@@ -1,15 +1,15 @@
-# vaws-top — NPU Fleet Monitor
+# npu-top · MindIE Agent
 
 面向本机单用户的 Ascend NPU 监控台。它通过宿主机 SSH 无代理采集，重点展示 NPU 利用率、HBM、CPU、系统内存、磁盘、挂载点和 Docker 容器，并以 SQLite 保存历史数据。用 `uvx` 在本机拉起，只服务自己，不对外提供托管服务。
 
-**vaws-top 只观测，不分配。** 它不是设备分配权威：哪些 NPU 可以被使用，由宿主机侧的 NPU 协调器队列决定。vaws-top 的所有 Agent 接口都把数据标注为"带观测时间戳的观测状态"，并明确声明不得据此做设备分配决策。详见 [docs/agent-access.md](docs/agent-access.md) 与 [docs/architecture.md](docs/architecture.md)。
+**npu-top 只观测，不分配。** 它不是设备分配权威：哪些 NPU 可以被使用，由宿主机侧的 NPU 协调器队列决定。npu-top 的所有 Agent 接口都把数据标注为"带观测时间戳的观测状态"，并明确声明不得据此做设备分配决策。详见 [docs/agent-access.md](docs/agent-access.md) 与 [docs/architecture.md](docs/architecture.md)。
 
 ## 诊断与故障状态
 
-CLI、MCP、HTTP、后台采集及 inventory 初始化使用零依赖的 `vaws-diagnostics`。
+CLI、MCP、HTTP、后台采集及 inventory 初始化使用零依赖的 `mindie-diagnostics`。
 该依赖固定为公开 canonical Git revision，独立 wheel/uvx 安装无需先准备 consumer
 或 knowledge；共享包的 release wheel 可用于离线依赖包。
-`VAWS_LOG_LEVEL` 控制 DEBUG/INFO/WARNING/ERROR，`VAWS_DIAGNOSTICS_ROOT` 可覆盖平台
+`MINDIE_LOG_LEVEL` 控制 DEBUG/INFO/WARNING/ERROR，`MINDIE_DIAGNOSTICS_ROOT` 可覆盖平台
 用户状态目录。不同进程独立写 JSONL，每段 1 MiB、保留三个轮转备份；可选诊断 worker
 按全局容量与时间保留清理旧进程日志。日志写失败保留原业务结果。
 
@@ -17,44 +17,44 @@ CLI、MCP、HTTP、后台采集及 inventory 初始化使用零依赖的 `vaws-d
 和异常类型；等待新采样的调用立即得到不可用，不伪造成功。失败 probe 的耗时来自
 实际工作线程内的计时，不再写零或把排队时间当作探测时间。不会自动重放 bootstrap。
 
-`vaws-top diagnostics bundle --root PATH --output support.json` 仅离线导出严格字段
+`npu-top diagnostics bundle --root PATH --output support.json` 仅离线导出严格字段
 投影与脱敏结果，不扫描宿主机、不启动服务、不上传原始 inventory、密码或命令。
 自动 issue 上报由独立启用的 reporter 负责；普通监控请求不等待网络上报。
 
 ## 安装与启动
 
-唯一版本号来自 `pyproject.toml` 的 `0.1.6`。MCP `serverInfo.version` 读取 `importlib.metadata.version("vaws-top")`；`package.json` 的 version 与之相同。
+唯一版本号来自 `pyproject.toml` 的 `0.1.6`。MCP `serverInfo.version` 读取 `importlib.metadata.version("npu-top")`；`package.json` 的 version 与之相同。
 
 ### 推荐：GitHub Release wheel（无需本机 Node）
 
 Release 资产里的 wheel 已打入前端构建产物。私有仓库下载需要已登录的 `gh` 或 `GITHUB_TOKEN`。
 
 ```bash
-gh release download v0.1.6 -R vllm-ascend-workspace/vaws-top -p '*.whl'
-uvx --from ./vaws_top-0.1.6-py3-none-any.whl vaws-top serve
+gh release download v0.1.6 -R mindie-agent/npu-top -p '*.whl'
+uvx --from ./npu_top-0.1.6-py3-none-any.whl npu-top serve
 ```
 
 或在已具备仓库读权限的环境里直接指向资产 URL：
 
 ```bash
-uvx --from "https://github.com/vllm-ascend-workspace/vaws-top/releases/download/v0.1.6/vaws_top-0.1.6-py3-none-any.whl" vaws-top serve
+uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.1.6/npu_top-0.1.6-py3-none-any.whl" npu-top serve
 ```
 
-浏览器访问 `http://127.0.0.1:8788`。`vaws-top serve` 单进程同时提供 HTTP API 与静态前端，默认只绑 loopback。`python -m vaws_top` 与 `vaws-top` 等价。
+浏览器访问 `http://127.0.0.1:8788`。`npu-top serve` 单进程同时提供 HTTP API 与静态前端，默认只绑 loopback。`python -m npu_top` 与 `npu-top` 等价。
 
 ### 开发者路径：从 git 构建（需要 Node.js 22.13+）
 
-`uvx --from git+…` 会在本机执行 hatch 构建。构建 hook 在缺少前端产物时会跑 `npm ci && npm run build`，没有 Node 会得到一个不含静态资源的 wheel，`vaws-top serve` 会立刻报错而不是 404。
+`uvx --from git+…` 会在本机执行 hatch 构建。构建 hook 在缺少前端产物时会跑 `npm ci && npm run build`，没有 Node 会得到一个不含静态资源的 wheel，`npu-top serve` 会立刻报错而不是 404。
 
 ```bash
-uvx --from git+https://github.com/vllm-ascend-workspace/vaws-top@main vaws-top serve
+uvx --from git+https://github.com/mindie-agent/npu-top@main npu-top serve
 ```
 
 源码树里也可以显式串起两步：
 
 ```bash
-git clone https://github.com/vllm-ascend-workspace/vaws-top.git
-cd vaws-top
+git clone https://github.com/mindie-agent/npu-top.git
+cd npu-top
 ./scripts/build_wheel.sh
 ```
 
@@ -65,23 +65,23 @@ cd vaws-top
 ```json
 {
   "mcpServers": {
-    "vaws-top": {
+    "npu-top": {
       "command": "uvx",
       "args": [
         "--from",
-        "https://github.com/vllm-ascend-workspace/vaws-top/releases/download/v0.1.6/vaws_top-0.1.6-py3-none-any.whl",
-        "vaws-top",
+        "https://github.com/mindie-agent/npu-top/releases/download/v0.1.6/npu_top-0.1.6-py3-none-any.whl",
+        "npu-top",
         "mcp"
       ],
       "env": {
-        "VAWS_TOP_URL": "http://127.0.0.1:8788"
+        "MINDIE_TOP_URL": "http://127.0.0.1:8788"
       }
     }
   }
 }
 ```
 
-开发者可用 `git+https://github.com/vllm-ascend-workspace/vaws-top@<ref>` 替换 `--from` 的 wheel URL。五个工具见 [docs/agent-access.md](docs/agent-access.md)。
+开发者可用 `git+https://github.com/mindie-agent/npu-top@<ref>` 替换 `--from` 的 wheel URL。五个工具见 [docs/agent-access.md](docs/agent-access.md)。
 
 ## 主要能力
 
@@ -100,17 +100,17 @@ cd vaws-top
 - 历史报表覆盖 1 小时到 90 天，包含聚合趋势，以及按日期和 2 小时时段排列的 CPU、内存、NPU、HBM 与逐卡 AICore 热力图；原始数据默认保留 90 天。
 - 默认只监听 `127.0.0.1`，不含登录功能，也不应直接暴露到外网。
 - 为 Agent 提供统一 CLI/MCP：可按 IP/主机名选择缓存或实时探查，筛选观测到的空闲算力，并查询 NPU、CPU、内存、容器/进程归属及挂载盘；SSH 始终封装在常驻采集器内。结构化 JSON、`observation` 信封和完整参数见 [Agent CLI 与 MCP](docs/agent-access.md)。
-- Agent 的完整使用与决策约定随仓库保存在 [`.agents/skills/vaws-top/SKILL.md`](.agents/skills/vaws-top/SKILL.md)。
+- Agent 的完整使用与决策约定随仓库保存在 [`.agents/skills/npu-top/SKILL.md`](.agents/skills/npu-top/SKILL.md)。
 
 ## 依赖与目录
 
 运行时需要 Python 3.11+、系统 OpenSSH 客户端和 `ssh-keygen`。后端只使用 Python 标准库，不依赖 `torch`/`torch_npu`。构建 wheel 或从 git 安装时才需要 Node.js 22.13+。
 
 ```text
-vaws_top/       Python 包：HTTP API、采集调度、npu-smi 解析、SSH、CLI、MCP
-vaws_top/static/  前端构建产物（gitignore，由 npm run build 写入 wheel）
+npu_top/       Python 包：HTTP API、采集调度、npu-smi 解析、SSH、CLI、MCP
+npu_top/static/  前端构建产物（gitignore，由 npm run build 写入 wheel）
 app/            前端源码（Vite 静态 SPA）
-tests/          标准库 unittest，针对安装后的 vaws_top 包
+tests/          标准库 unittest，针对安装后的 npu_top 包
 scripts/        build_wheel.sh：npm ci && npm run build && uv build
 docs/           架构与 Agent 接口
 .agents/skills/ 随仓库分发的 Agent Skill
@@ -135,20 +135,20 @@ docs/           架构与 Agent 接口
 ## CLI
 
 ```bash
-vaws-top serve
-vaws-top serve --port 9876
-vaws-top mcp
-vaws-top npu 192.0.2.21
-vaws-top servers
-vaws-top status 192.0.2.21
-vaws-top mounts 192.0.2.21
-vaws-top capacity --min-idle 4
+npu-top serve
+npu-top serve --port 9876
+npu-top mcp
+npu-top npu 192.0.2.21
+npu-top servers
+npu-top status 192.0.2.21
+npu-top mounts 192.0.2.21
+npu-top capacity --min-idle 4
 ```
 
-开发时分别跑前端热更新（Vite 把 `/api` 代理到本机 `vaws-top serve`）：
+开发时分别跑前端热更新（Vite 把 `/api` 代理到本机 `npu-top serve`）：
 
 ```bash
-vaws-top serve --port 8788
+npu-top serve --port 8788
 npm ci
 npm run dev
 ```
@@ -168,7 +168,7 @@ example-a3-01, 192.0.2.21, 22, root, A3|训练
 
 ## 与 vllm-ascend-workspace 的关系
 
-本仓库从 `vllm-ascend-workspace` 脚手架拆出。脚手架侧如需拉起本机监控台，应安装本仓库的 wheel 或 `uvx` 调用 `vaws-top serve`，不要再部署成常驻多用户服务。本仓库本身不依赖脚手架的任何文件或目录布局。
+本仓库从 `vllm-ascend-workspace` 脚手架拆出。脚手架侧如需拉起本机监控台，应安装本仓库的 wheel 或 `uvx` 调用 `npu-top serve`，不要再部署成常驻多用户服务。本仓库本身不依赖脚手架的任何文件或目录布局。
 
 ## 测试与 CI
 

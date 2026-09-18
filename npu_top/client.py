@@ -17,14 +17,14 @@ class ClientError(RuntimeError):
 
 class VawsTopClient:
     def __init__(self, base_url: str | None = None, timeout: float = 3.0) -> None:
-        self.base_url = (base_url or os.environ.get("VAWS_TOP_URL") or DEFAULT_URL).rstrip("/")
+        self.base_url = (base_url or os.environ.get("MINDIE_TOP_URL") or DEFAULT_URL).rstrip("/")
         self.timeout = timeout
         parsed = urlparse(self.base_url)
         if (
             (parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "localhost") or parsed.path not in ("", "/"))
-            and not os.environ.get("VAWS_TOP_ALLOW_REMOTE")
+            and not os.environ.get("MINDIE_TOP_ALLOW_REMOTE")
         ):
-            raise ClientError("non-loopback API requires VAWS_TOP_ALLOW_REMOTE=1")
+            raise ClientError("non-loopback API requires MINDIE_TOP_ALLOW_REMOTE=1")
         self.opener = build_opener(ProxyHandler({}))
 
     def _get(
@@ -41,9 +41,9 @@ class VawsTopClient:
                 message = json.loads(exc.read()).get("error")
             except (json.JSONDecodeError, AttributeError):
                 message = None
-            raise ClientError(message or f"vaws-top API returned HTTP {exc.code}") from exc
+            raise ClientError(message or f"npu-top API returned HTTP {exc.code}") from exc
         except (OSError, URLError, json.JSONDecodeError) as exc:
-            raise ClientError(f"vaws-top unavailable at {self.base_url}: {exc}") from exc
+            raise ClientError(f"npu-top unavailable at {self.base_url}: {exc}") from exc
 
     def servers(self) -> dict[str, Any]:
         return self._get("/api/agent/servers")

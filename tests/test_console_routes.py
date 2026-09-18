@@ -16,10 +16,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
-from vaws_top.api import App, AppServer, require_loopback_bind
-from vaws_top.db import Database
-from vaws_top.settings import Settings
-from vaws_top.static_files import STATIC_MISSING, require_static
+from npu_top.api import App, AppServer, require_loopback_bind
+from npu_top.db import Database
+from npu_top.settings import Settings
+from npu_top.static_files import STATIC_MISSING, require_static
 
 
 JSON_TYPE = "application/json; charset=utf-8"
@@ -93,10 +93,10 @@ def console(*, web_root: Path | None = None, seed_server: bool = True):
         else:
             static = (state / "static").resolve()
             static.mkdir()
-            (static / "index.html").write_text("<!doctype html><title>vaws-top</title>", encoding="utf-8")
+            (static / "index.html").write_text("<!doctype html><title>npu-top</title>", encoding="utf-8")
             app.web_root = static
         server = AppServer(("127.0.0.1", 0), app)
-        thread = threading.Thread(target=server.serve_forever, name="vaws-top-test", daemon=True)
+        thread = threading.Thread(target=server.serve_forever, name="npu-top-test", daemon=True)
         thread.start()
         try:
             host, port = server.server_address[:2]
@@ -172,7 +172,7 @@ class FrontendAssetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             index = Path(root) / "index.html"
             index.write_text("<!doctype html><title>ok</title>", encoding="utf-8")
-            with mock.patch("vaws_top.static_files.static_dir", return_value=Path(root)):
+            with mock.patch("npu_top.static_files.static_dir", return_value=Path(root)):
                 found = require_static()
             self.assertEqual(found, Path(root))
             self.assertTrue((found / "index.html").is_file())
@@ -192,7 +192,7 @@ class FrontendAssetTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIsNotNone(content_type)
         self.assertTrue(content_type.startswith("text/html"), content_type)
-        self.assertIn(b"vaws-top", raw)
+        self.assertIn(b"npu-top", raw)
 
 
 class ConsoleRouteTests(unittest.TestCase):

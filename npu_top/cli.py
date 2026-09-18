@@ -14,7 +14,7 @@ from .client import (
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
-        prog="vaws-top",
+        prog="npu-top",
         description="Local Ascend NPU fleet monitor and compact observation CLI",
         epilog=(
             "Observation only: every result describes host state at its observed_at timestamp. "
@@ -23,7 +23,7 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     result.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
-    result.add_argument("--url", help="vaws-top loopback API URL (default: http://127.0.0.1:8788)")
+    result.add_argument("--url", help="npu-top loopback API URL (default: http://127.0.0.1:8788)")
     result.add_argument("--json", action="store_true", help="emit compact JSON")
     sub = result.add_subparsers(dest="command", required=True)
     serve = sub.add_parser("serve", help="start HTTP API and static console on loopback")
@@ -65,11 +65,11 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["diagnostics"]:
-        from vaws_diagnostics.cli import main as diagnostics_main
+        from mindie_diagnostics.cli import main as diagnostics_main
         return diagnostics_main(argv[1:])
     args = parser().parse_args(argv)
     if args.command == "diagnostics":
-        from vaws_diagnostics.cli import main as diagnostics_main
+        from mindie_diagnostics.cli import main as diagnostics_main
         return diagnostics_main(args.arguments)
     if args.command == "serve":
         if args.bind:

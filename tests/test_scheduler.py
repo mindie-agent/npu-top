@@ -6,9 +6,9 @@ import time
 import unittest
 from pathlib import Path
 
-from vaws_top.db import Database
-from vaws_top.scheduler import AdaptiveScheduler
-from vaws_top.settings import Settings
+from npu_top.db import Database
+from npu_top.scheduler import AdaptiveScheduler
+from npu_top.settings import Settings
 
 
 class SchedulerTests(unittest.TestCase):

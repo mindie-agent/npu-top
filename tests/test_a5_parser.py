@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
-from vaws_top import npu_smi
-from vaws_top.probe import is_device_busy
+from npu_top import npu_smi
+from npu_top.probe import is_device_busy
 
 
 class A5ParserTests(unittest.TestCase):

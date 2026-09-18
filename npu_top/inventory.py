@@ -177,5 +177,5 @@ def _safe_command_error(stdout: str, stderr: str) -> str:
             return str(payload.get("message") or payload.get("error") or "密钥引导失败")[-1000:]
     except json.JSONDecodeError:
         pass
-    lines = [line for line in stderr.splitlines() if not line.startswith("__VAWS_PROGRESS__=")]
+    lines = [line for line in stderr.splitlines() if not line.startswith("__MINDIE_PROGRESS__=")]
     return ("\n".join(lines) or "密钥引导失败")[-1000:]

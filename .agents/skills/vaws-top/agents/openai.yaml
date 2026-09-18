@@ -1,4 +1,4 @@
 interface:
-  display_name: "vaws-top"
+  display_name: "npu-top"
   short_description: "Inspect observed state of local NPU fleet servers"
-  default_prompt: "Use $vaws-top to inspect observed NPU fleet state from cache or with one live refresh; device allocation still comes from the coordinator."
+  default_prompt: "Use $npu-top to inspect observed NPU fleet state from cache or with one live refresh; device allocation still comes from the coordinator."

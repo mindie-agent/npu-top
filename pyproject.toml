@@ -3,27 +3,27 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "vaws-top"
+name = "npu-top"
 version = "0.1.6"
 description = "Local-only Ascend NPU fleet monitor"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-dependencies = ["vaws-diagnostics @ git+https://github.com/vllm-ascend-workspace/vaws-diagnostics@96fcdfaa0f25fa59f12e948eb4e17ead775f3287"]
+dependencies = ["mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@db16926ed04fdaede28824b6e4f3aff5fb35e603"]
 authors = [{ name = "vllm-ascend-workspace" }]
 
 [project.scripts]
-vaws-top = "vaws_top.cli:main"
+npu-top = "npu_top.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/vllm-ascend-workspace/vaws-top"
-Repository = "https://github.com/vllm-ascend-workspace/vaws-top"
+Homepage = "https://github.com/mindie-agent/npu-top"
+Repository = "https://github.com/mindie-agent/npu-top"
 
 [tool.hatch.metadata]
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["vaws_top"]
+packages = ["npu_top"]
 
 [tool.hatch.build.hooks.custom]
 path = "hatch_build.py"

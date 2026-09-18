@@ -19,7 +19,7 @@ INITIALS_STOP_WORDS = {
     "vllm", "work",
 }
 FAST_SCRIPT = r'''set +e
-if [ -f /etc/profile.d/vaws-ascend-env.sh ]; then . /etc/profile.d/vaws-ascend-env.sh >/dev/null 2>&1; fi
+if [ -f /etc/profile.d/mindie-ascend-env.sh ]; then . /etc/profile.d/mindie-ascend-env.sh >/dev/null 2>&1; fi
 export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64:${LD_LIBRARY_PATH:-}
 printf '__NFM_SECTION__hostname\n'; hostname 2>/dev/null
 printf '__NFM_SECTION__proc_stat\n'; head -n 1 /proc/stat 2>/dev/null

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from vaws_top.agent_view import (
+from npu_top.agent_view import (
     OBSERVATION_KIND, AgentQueryError, capacity_candidates, compact_server, find_server, npu_status,
     observation_envelope, server_status,
 )

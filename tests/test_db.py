@@ -5,7 +5,7 @@ import time
 import unittest
 from pathlib import Path
 
-from vaws_top.db import Database
+from npu_top.db import Database
 
 
 class DatabaseTests(unittest.TestCase):

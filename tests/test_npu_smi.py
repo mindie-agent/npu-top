@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from vaws_top.npu_smi import apply_usage_overrides, parse_npu, parse_npu_smi_info, parse_npu_smi_usages
+from npu_top.npu_smi import apply_usage_overrides, parse_npu, parse_npu_smi_info, parse_npu_smi_usages
 
 
 SINGLE_DIE = """

@@ -4,8 +4,8 @@ import json
 import unittest
 from pathlib import Path
 
-from vaws_top.probe import attach_npu_telemetry, is_device_busy
-from vaws_top import npu_smi
+from npu_top.probe import attach_npu_telemetry, is_device_busy
+from npu_top import npu_smi
 
 
 class CapturedNpuSmiTests(unittest.TestCase):

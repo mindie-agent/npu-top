@@ -118,7 +118,7 @@ def handle_request(request: dict[str, Any], client: VawsTopClient) -> dict[str, 
         if method == "server/discover":
             result = {
                 "protocolVersions": SUPPORTED_VERSIONS,
-                "serverInfo": {"name": "vaws-top", "version": __version__},
+                "serverInfo": {"name": "npu-top", "version": __version__},
                 "capabilities": {"tools": {"listChanged": False}},
             }
         elif method == "initialize":
@@ -127,7 +127,7 @@ def handle_request(request: dict[str, Any], client: VawsTopClient) -> dict[str, 
             result = {
                 "protocolVersion": version,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "vaws-top", "version": __version__},
+                "serverInfo": {"name": "npu-top", "version": __version__},
             }
         elif method == "ping":
             result = {}

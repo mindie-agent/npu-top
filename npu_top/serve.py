@@ -12,7 +12,7 @@ from .probe import HostProbe
 from .scheduler import AdaptiveScheduler
 from .settings import Settings
 from .observability import observed
-from vaws_diagnostics import get_recorder, wrap_context
+from mindie_diagnostics import get_recorder, wrap_context
 
 
 @observed("top.serve")
@@ -59,7 +59,7 @@ def main() -> None:
                 if tags != server_record.get("tags", []):
                     db.update_server(server_record["id"], tags=tags)
                     server_record = {**server_record, "tags": tags}
-            with get_recorder("vaws-top").operation("top.inventory.bootstrap") as operation:
+            with get_recorder("npu-top").operation("top.inventory.bootstrap") as operation:
                 auth = adapter.bootstrap_with_passwords(server_record, [])
                 if not auth.get("ok"):
                     operation.fail("bootstrap_failed", detail=auth.get("error"))
@@ -71,7 +71,7 @@ def main() -> None:
             existing[endpoint] = server_record
 
     threading.Thread(target=wrap_context(import_inventory), name="nfm-inventory-import", daemon=True).start()
-    print(f"vaws-top: http://{settings.bind}:{settings.port}", flush=True)
+    print(f"npu-top: http://{settings.bind}:{settings.port}", flush=True)
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:

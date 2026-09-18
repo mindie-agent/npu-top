@@ -5,7 +5,7 @@ Browser (127.0.0.1:8788)
   ├─ static dashboard + history + server onboarding
   └─ same-origin /api/*
         ↓ loopback only, single process
-vaws-top serve (HTTP API + AdaptiveScheduler)
+npu-top serve (HTTP API + AdaptiveScheduler)
   ├─ viewer leases: fastest of 1s / 5s / 10s / 30s
   ├─ idle fallback: 120s
   ├─ history write floor: 30s
@@ -21,7 +21,7 @@ Bare-metal NPU hosts
 
 ## Host access and inventory
 
-`DeviceAdapter` (`vaws_top/device_adapter.py`) is the composition root for everything that touches a host. It is assembled from injected parts and holds no knowledge of where the monitor is installed or which project manages the fleet:
+`DeviceAdapter` (`npu_top/device_adapter.py`) is the composition root for everything that touches a host. It is assembled from injected parts and holds no knowledge of where the monitor is installed or which project manages the fleet:
 
 - `SshAccess` owns the monitor's dedicated Ed25519 key, its isolated `known_hosts`, and the OpenSSH options used for probes.
 - `npu_smi` parses `npu-smi info` and `npu-smi info -t usages` output. It is bundled and unit-tested here; no external parser is imported at runtime.
@@ -34,13 +34,13 @@ Inventory says which hosts exist. It does not say which devices may be used; see
 
 ## Observation-only contract
 
-vaws-top observes. It is not a device-allocation authority and must not be used to decide which NPUs a workload may take. Three places describe the same devices in a typical deployment: this monitor, the host-side NPU coordinator queue, and the machine inventory. Only the coordinator queue grants devices; the inventory says which hosts exist; the monitor reports what a host looked like when it was last probed.
+npu-top observes. It is not a device-allocation authority and must not be used to decide which NPUs a workload may take. Three places describe the same devices in a typical deployment: this monitor, the host-side NPU coordinator queue, and the machine inventory. Only the coordinator queue grants devices; the inventory says which hosts exist; the monitor reports what a host looked like when it was last probed.
 
 The contract is made explicit in the interface rather than left to documentation:
 
 - Every `/api/agent/*` payload carries an `observation` envelope (`agent_view.observation_envelope`) with `kind`, `observed_at`, `observed_at_iso`, `age_seconds`, `allocation_authority: false` and a human-readable `notice`. `compact_server` rows and capacity candidates carry their own `observed_at`.
 - `/api/agent/capacity` uses `kind: observed_availability`; its `observed_at` is the oldest snapshot the list relied on, and its notice states that idle counts are not reservations.
-- All `/api/` responses send `X-VAWS-Top-Contract: observation-only`; `/api/health` reports `contract: observation-only`.
+- All `/api/` responses send `X-MindIE-Top-Contract: observation-only`; `/api/health` reports `contract: observation-only`.
 - Every MCP tool description and the CLI help end with the same statement; `tests/test_agent_cli_mcp.py` fails if a tool drops it.
 
 Fields that are inherently allocation-shaped and therefore deserve extra care in consumers: `busy` / `busy_npu_count` / `idle_npu_count` (derived from processes, AICore and an HBM threshold at probe time), the `capacity` endpoint and `find_npu_capacity` tool (a ranked shortlist), and the derived `低优先级` tag (inventory membership, not a policy grant). The monitor does not integrate with the coordinator and does not know about leases; it keeps these fields because they are useful observations, and labels them so they cannot be mistaken for grants.

@@ -3,10 +3,10 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-import vaws_top
-from vaws_top import cli as CLI
-from vaws_top import mcp as MCP
-from vaws_top.client import ClientError, VawsTopClient, format_mounts, format_npu, format_server
+import npu_top
+from npu_top import cli as CLI
+from npu_top import mcp as MCP
+from npu_top.client import ClientError, VawsTopClient, format_mounts, format_npu, format_server
 
 
 PAYLOAD = {
@@ -76,7 +76,7 @@ class AgentCliMcpTests(unittest.TestCase):
         VawsTopClient("http://localhost:9999")
 
     def test_client_explicitly_bypasses_environment_proxies(self) -> None:
-        with mock.patch("vaws_top.client.build_opener") as build:
+        with mock.patch("npu_top.client.build_opener") as build:
             VawsTopClient()
         proxy_handler = build.call_args.args[0]
         self.assertEqual(proxy_handler.proxies, {})
@@ -136,8 +136,8 @@ class AgentCliMcpTests(unittest.TestCase):
                 {"jsonrpc": "2.0", "id": 1, "method": method, "params": {}},
                 FakeClient(),
             )
-            self.assertEqual(response["result"]["serverInfo"]["name"], "vaws-top")
-            self.assertEqual(response["result"]["serverInfo"]["version"], vaws_top.__version__)
+            self.assertEqual(response["result"]["serverInfo"]["name"], "npu-top")
+            self.assertEqual(response["result"]["serverInfo"]["version"], npu_top.__version__)
             self.assertNotIn("experimental", response["result"]["capabilities"])
 
 

@@ -4,7 +4,7 @@
 
 Accept a start or restart only when:
 
-- `vaws-top serve` is the process under test (HTTP API and static frontend, one process);
+- `npu-top serve` is the process under test (HTTP API and static frontend, one process);
 - `http://127.0.0.1:8788/api/health` returns `status=ok` and `contract=observation-only` without using an HTTP proxy;
 - `GET /` returns the packed dashboard (`200`), not a missing-static error;
 - `/api/agent/servers` returns compact JSON with `source=cache` and an `observation` envelope whose `allocation_authority` is `false`;

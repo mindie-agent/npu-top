@@ -6,7 +6,7 @@ export default defineConfig({
   plugins: [react()],
   css: { postcss: { plugins: [tailwindcss()] } },
   build: {
-    outDir: 'vaws_top/static',
+    outDir: 'npu_top/static',
     emptyOutDir: true,
   },
   server: {

@@ -7,10 +7,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from vaws_top.inventory import (
+from npu_top.inventory import (
     LOW_PRIORITY_TAG, ExternalKeyBootstrap, HostPoolFile, MachineInventoryFile, merge_sources,
 )
-from vaws_top.settings import Settings
+from npu_top.settings import Settings
 
 
 class InventoryTests(unittest.TestCase):

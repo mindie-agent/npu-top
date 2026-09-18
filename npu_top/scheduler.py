@@ -6,7 +6,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
-from vaws_diagnostics import get_recorder, wrap_context
+from mindie_diagnostics import get_recorder, wrap_context
 
 from .db import Database
 from .probe import HostProbe
@@ -145,7 +145,7 @@ class AdaptiveScheduler:
         # A dead collector must be visible to health and waiting callers. Do
         # not replay bootstrap or mutate host state after an unknown failure.
         try:
-            with get_recorder("vaws-top").operation("top.collector", level="DEBUG"):
+            with get_recorder("npu-top").operation("top.collector", level="DEBUG"):
                 self._run_loop()
         except Exception as exc:
             with self._condition:
@@ -242,7 +242,7 @@ class AdaptiveScheduler:
         # time.monotonic there has a 15.625 ms GetTickCount64 resolution.
         started = time.perf_counter()
         try:
-            with get_recorder("vaws-top").operation("top.probe", level="DEBUG"):
+            with get_recorder("npu-top").operation("top.probe", level="DEBUG"):
                 return self.probe.collect(server, include_infra)
         except Exception as exc:
             raise _ProbeFailure(exc, round((time.perf_counter() - started) * 1000, 3)) from exc

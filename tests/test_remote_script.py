@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from vaws_top.probe import FAST_SCRIPT, INFRA_SCRIPT, PROCESS_DETAIL_SCRIPT, HostProbe
+from npu_top.probe import FAST_SCRIPT, INFRA_SCRIPT, PROCESS_DETAIL_SCRIPT, HostProbe
 
 
 class RemoteScriptTests(unittest.TestCase):

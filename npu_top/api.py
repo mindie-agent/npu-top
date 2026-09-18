@@ -23,7 +23,7 @@ from .device_adapter import DeviceAdapter
 from .scheduler import AdaptiveScheduler
 from .settings import Settings
 from .observability import observed, capture_failure, record_http_status
-from vaws_diagnostics import get_recorder
+from mindie_diagnostics import get_recorder
 
 
 RANGES = {
@@ -143,7 +143,7 @@ class App:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = f"vaws-top/{__version__}"
+    server_version = f"npu-top/{__version__}"
 
     @property
     def app(self) -> App:
@@ -152,7 +152,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         # Request targets may carry user text/credentials. Never copy them to
         # diagnostics; each handler records outcome and elapsed time separately.
-        get_recorder("vaws-top").event("DEBUG", "http.response", method=self.command)
+        get_recorder("npu-top").event("DEBUG", "http.response", method=self.command)
 
     def _headers(self, status: int, content_type: str, length: int | None = None) -> None:
         record_http_status(status)
@@ -164,7 +164,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/api/"):
             # The API reports what hosts looked like when they were probed. It
             # never grants devices; consumers must not treat it as an allocator.
-            self.send_header("X-VAWS-Top-Contract", "observation-only")
+            self.send_header("X-MindIE-Top-Contract", "observation-only")
         origin = self.headers.get("Origin", "")
         if re.match(r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$", origin):
             self.send_header("Access-Control-Allow-Origin", origin)
@@ -388,7 +388,7 @@ class Handler(BaseHTTPRequestHandler):
                     "host": host, "port": port, "username": username,
                     "tags": normalize_tags(entry.get("tags", [])),
                 })
-                with get_recorder("vaws-top").operation("top.server.bootstrap") as operation:
+                with get_recorder("npu-top").operation("top.server.bootstrap") as operation:
                     auth = self.app.adapter.bootstrap_with_passwords(server, passwords)
                     if not auth["ok"]:
                         operation.fail("bootstrap_failed", detail=auth.get("error"))
@@ -427,7 +427,7 @@ LOOPBACK_BINDS = frozenset({"127.0.0.1", "::1", "localhost"})
 def require_loopback_bind(host: str) -> str:
     """Refuse a non-loopback listen address. The console is local-only."""
     if host not in LOOPBACK_BINDS:
-        raise ValueError(f"vaws-top binds loopback only, refused {host!r}")
+        raise ValueError(f"npu-top binds loopback only, refused {host!r}")
     return host
 
 
