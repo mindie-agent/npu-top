@@ -22,7 +22,7 @@ class VawsTopClient:
         parsed = urlparse(self.base_url)
         if (
             (parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "localhost") or parsed.path not in ("", "/"))
-            and not os.environ.get("MINDIE_TOP_ALLOW_REMOTE")
+            and os.environ.get("MINDIE_TOP_ALLOW_REMOTE") != "1"
         ):
             raise ClientError("non-loopback API requires MINDIE_TOP_ALLOW_REMOTE=1")
         self.opener = build_opener(ProxyHandler({}))
