@@ -9,7 +9,7 @@ description = "Local-only Ascend NPU fleet monitor"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-dependencies = ["mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@db16926ed04fdaede28824b6e4f3aff5fb35e603"]
+dependencies = ["mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@c62c1a6553a293e77b8b98d3523c5d7ff208188f"]
 authors = [{ name = "vllm-ascend-workspace" }]
 
 [project.scripts]
