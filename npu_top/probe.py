@@ -32,7 +32,7 @@ printf '__NFM_SECTION__npu_usages\n'; timeout 8 npu-smi info -t usages 2>&1
 '''
 
 INFRA_SCRIPT = r'''set +e
-printf '__NFM_SECTION__disk\n'; df -P -B1 -x tmpfs -x devtmpfs 2>/dev/null
+printf '__NFM_SECTION__disk\n'; df -P -B1 -x tmpfs -x devtmpfs -x overlay 2>/dev/null
 printf '__NFM_SECTION__mounts\n'; if command -v findmnt >/dev/null 2>&1; then findmnt -J -o TARGET,SOURCE,FSTYPE,OPTIONS 2>/dev/null; else cat /proc/mounts 2>/dev/null; fi
 printf '__NFM_SECTION__docker\n'; if command -v docker >/dev/null 2>&1; then docker ps --no-trunc --format '{{json .}}' 2>&1; else printf 'unavailable\n'; fi
 printf '__NFM_SECTION__docker_stats\n'; if command -v docker >/dev/null 2>&1; then timeout 10 docker stats --no-stream --format '{{json .}}' 2>/dev/null; fi
@@ -112,6 +112,16 @@ def cpu_percent(previous: tuple[int, int] | None, current: tuple[int, int] | Non
     return round(max(0.0, min(100.0, (total - idle) * 100.0 / total)), 1)
 
 
+def _is_excluded_storage(source: str | None, target: str | None, fstype: str | None = None) -> bool:
+    mount = str(target or "").rstrip("/")
+    excluded_mounts = ("/boot", "/efi", "/var/lib/docker/overlay", "/var/lib/docker/overlay2")
+    return (
+        str(source or "").casefold() == "overlay"
+        or str(fstype or "").casefold() == "overlay"
+        or any(mount == base or mount.startswith(base + "/") for base in excluded_mounts)
+    )
+
+
 def parse_disks(text: str) -> list[dict[str, Any]]:
     disks: list[dict[str, Any]] = []
     for line in text.splitlines()[1:]:
@@ -123,9 +133,12 @@ def parse_disks(text: str) -> list[dict[str, Any]]:
             percent = float(cells[4].rstrip("%"))
         except ValueError:
             continue
+        mount = " ".join(cells[5:])
+        if _is_excluded_storage(cells[0], mount):
+            continue
         disks.append({
             "filesystem": cells[0], "total_bytes": total, "used_bytes": used,
-            "available_bytes": available, "used_percent": percent, "mount": " ".join(cells[5:]),
+            "available_bytes": available, "used_percent": percent, "mount": mount,
         })
     return disks
 
@@ -137,10 +150,11 @@ def parse_mounts(text: str) -> list[dict[str, Any]]:
 
         def append_filesystems(filesystems: list[dict[str, Any]]) -> None:
             for item in filesystems:
-                mounts.append({
-                    "target": item.get("target"), "source": item.get("source"),
-                    "fstype": item.get("fstype"), "options": item.get("options"),
-                })
+                if not _is_excluded_storage(item.get("source"), item.get("target"), item.get("fstype")):
+                    mounts.append({
+                        "target": item.get("target"), "source": item.get("source"),
+                        "fstype": item.get("fstype"), "options": item.get("options"),
+                    })
                 append_filesystems(item.get("children") or [])
 
         append_filesystems(payload.get("filesystems", []))
@@ -149,7 +163,7 @@ def parse_mounts(text: str) -> list[dict[str, Any]]:
         mounts = []
         for line in text.splitlines():
             cells = line.split()
-            if len(cells) >= 4:
+            if len(cells) >= 4 and not _is_excluded_storage(cells[0], cells[1], cells[2]):
                 mounts.append({"source": cells[0], "target": cells[1], "fstype": cells[2], "options": cells[3]})
         return mounts
 
