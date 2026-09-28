@@ -168,6 +168,8 @@ def format_mounts(payload: dict[str, Any]) -> str:
             not target
             or str(mount.get("fstype") or "").casefold() in hidden_types
             or target.startswith("/var/lib/docker/")
+            or target in ("/boot", "/efi")
+            or target.startswith(("/boot/", "/efi/"))
         ):
             continue
         capacity = ""

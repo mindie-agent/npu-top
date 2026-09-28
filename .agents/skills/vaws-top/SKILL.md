@@ -40,7 +40,7 @@ Use the running local monitor as the single *observation* interface for fleet st
    npu-top mounts 192.0.2.21
    ```
 
-   Default text hides pseudo and container-overlay filesystems. JSON/MCP structured results retain the full mount list. `weight_candidate` is a heuristic; it does not recursively scan the remote filesystem.
+   Disk and mount snapshots exclude Docker overlay and boot partitions (`/boot`, `/efi`, and their children). Default text also hides other pseudo filesystems; JSON/MCP structured results retain those other mounts. `weight_candidate` is a heuristic; it does not recursively scan the remote filesystem.
 
 4. Immediately before asking the coordinator for devices on a host, refresh only that host so the observation is current:
 

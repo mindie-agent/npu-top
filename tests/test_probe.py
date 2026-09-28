@@ -45,12 +45,49 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(rows[0]["used_percent"], 80)
         self.assertEqual(rows[0]["mount"], "/")
 
+    def test_disk_parser_excludes_overlay_and_boot_partitions(self) -> None:
+        rows = parse_disks("\n".join([
+            "Filesystem 1-blocks Used Available Capacity Mounted on",
+            "/dev/sda1 1000 400 600 40% /",
+            "overlay 1000 990 10 99% /var/lib/docker/overlay2/abc/merged",
+            "/dev/sda2 1000 950 50 95% /boot",
+            "/dev/sda3 1000 920 80 92% /boot/efi",
+            "/dev/sda4 1000 910 90 91% /efi",
+            "/dev/sdb1 1000 500 500 50% /data/models",
+            "/dev/sdc1 1000 700 300 70% /bootdata",
+        ]))
+        self.assertEqual([row["mount"] for row in rows], ["/", "/data/models", "/bootdata"])
+        self.assertEqual(max(row["used_percent"] for row in rows), 70)
+
     def test_findmnt_parser_flattens_nested_mounts(self) -> None:
         mounts = parse_mounts(json.dumps({"filesystems": [{
             "target": "/", "source": "/dev/root", "fstype": "ext4", "options": "rw",
             "children": [{"target": "/data/models", "source": "nfs:/weights", "fstype": "nfs4", "options": "rw"}],
         }]}))
         self.assertEqual([mount["target"] for mount in mounts], ["/", "/data/models"])
+
+    def test_mount_parser_excludes_overlay_and_boot_in_both_formats(self) -> None:
+        filesystems = [{
+            "target": "/", "source": "/dev/sda1", "fstype": "ext4",
+            "children": [
+                {"target": "/boot", "source": "/dev/sda2", "fstype": "ext4", "children": [
+                    {"target": "/boot/efi", "source": "/dev/sda3", "fstype": "vfat"},
+                ]},
+                {"target": "/var/lib/docker/overlay2/abc/merged", "source": "overlay", "fstype": "overlay"},
+                {"target": "/data/models", "source": "nfs:/weights", "fstype": "nfs4"},
+            ],
+        }]
+        expected = ["/", "/data/models"]
+        self.assertEqual(
+            [mount["target"] for mount in parse_mounts(json.dumps({"filesystems": filesystems}))], expected,
+        )
+        proc_mounts = "\n".join([
+            "/dev/sda1 / ext4 rw 0 0",
+            "/dev/sda2 /boot ext4 rw 0 0",
+            "overlay /var/lib/docker/overlay2/abc/merged overlay rw 0 0",
+            "nfs:/weights /data/models nfs4 rw 0 0",
+        ])
+        self.assertEqual([mount["target"] for mount in parse_mounts(proc_mounts)], expected)
 
     def test_docker_stats_and_npu_telemetry(self) -> None:
         docker = parse_docker(

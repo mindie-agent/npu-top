@@ -51,6 +51,8 @@ class AgentCliMcpTests(unittest.TestCase):
             {"target": "/", "source": "/dev/root", "fstype": "ext4", "used_percent": 50, "available_bytes": 1024 ** 3, "total_bytes": 2 * 1024 ** 3},
             {"target": "/data/weights", "source": "nfs:/models", "fstype": "nfs4", "weight_candidate": True},
             {"target": "/proc", "source": "proc", "fstype": "proc"},
+            {"target": "/boot", "source": "/dev/sda2", "fstype": "ext4"},
+            {"target": "/boot/efi", "source": "/dev/sda3", "fstype": "vfat"},
             {"target": "/var/lib/docker/overlay/merged", "source": "overlay", "fstype": "overlay"},
         ]}})
         self.assertEqual(len(output.splitlines()), 2)
