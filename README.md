@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/mindie-agent/mindie-agent/main/assets/brand/mindie-agent-logo.png" alt="MindIE Agent logo" width="128" height="128">
+</p>
+
 # npu-top · MindIE Agent
 
 面向本机单用户的 Ascend NPU 监控台。它通过宿主机 SSH 无代理采集，重点展示 NPU 利用率、HBM、CPU、系统内存、磁盘、挂载点和 Docker 容器，并以 SQLite 保存历史数据。用 `uvx` 在本机拉起，只服务自己，不对外提供托管服务。
