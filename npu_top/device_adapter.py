@@ -84,8 +84,11 @@ class DeviceAdapter:
         preflight = self.ssh.preflight(server)
         if not preflight["ok"]:
             return {"ok": False, "method": None, "attempts": 0, "error": preflight["error"]}
-        if self.ssh.key_auth_works(server):
+        key_auth_ok, key_auth_error = self.ssh.check_key_auth(server)
+        if key_auth_ok:
             return {"ok": True, "method": "existing-key", "attempts": 0}
+        if key_auth_error:
+            return {"ok": False, "method": None, "attempts": 0, "error": key_auth_error}
         if self.ssh.install_key_with_default_identity(server):
             return {"ok": True, "method": "default-identity", "attempts": 0}
         if not passwords:

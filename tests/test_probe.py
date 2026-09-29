@@ -174,11 +174,12 @@ class ProbeTests(unittest.TestCase):
 
     def test_control_path_stays_below_unix_socket_limit(self) -> None:
         with tempfile.TemporaryDirectory() as state:
-            ssh = SshAccess(Path(state), PROJECT, is_windows=False)
+            ssh = SshAccess(Path(state), Path(state), is_windows=False)
             command = ssh.ssh_base({"host": "198.51.100.1", "port": 22, "username": "root"})
             option = next(command[index + 1] for index, value in enumerate(command) if value == "-o" and command[index + 1].startswith("ControlPath="))
             expanded = option.split("=", 1)[1].replace("%C", "x" * 40)
             self.assertLess(len(expanded), 100)
+            self.assertEqual((ssh.working_dir / expanded).parent, Path(state) / "ssh-control")
 
     def test_windows_ssh_omits_unix_control_socket_options(self) -> None:
         with tempfile.TemporaryDirectory() as state:
@@ -228,12 +229,48 @@ class ProbeTests(unittest.TestCase):
             server = {"host": "198.51.100.1", "port": 22, "username": "root"}
             with (
                 mock.patch.object(ssh, "preflight", return_value={"ok": True}),
-                mock.patch.object(ssh, "key_auth_works", return_value=False),
+                mock.patch.object(ssh, "check_key_auth", return_value=(False, None)),
                 mock.patch.object(ssh, "install_key_with_default_identity", return_value=False),
             ):
                 result = adapter.bootstrap_with_passwords(server, ["secret"])
         self.assertFalse(result["ok"])
         self.assertIn("NFM_BOOTSTRAP_COMMAND", result["error"])
+
+    def test_socket_failure_is_reported_as_ssh_error(self) -> None:
+        with tempfile.TemporaryDirectory() as state:
+            ssh = SshAccess(Path(state), Path(state), is_windows=False)
+            adapter = DeviceAdapter(ssh)
+            server = {"host": "198.51.100.1", "port": 22, "username": "root"}
+            failed = subprocess.CompletedProcess(
+                [], 255, "", "unix_listener: cannot bind to path ssh-control/example: No such file or directory",
+            )
+            with (
+                mock.patch.object(ssh, "preflight", return_value={"ok": True}),
+                mock.patch.object(ssh, "ensure_key"),
+                mock.patch.object(ssh, "install_key_with_default_identity") as install,
+                mock.patch("npu_top.ssh_access.subprocess.run", return_value=failed),
+            ):
+                result = adapter.bootstrap_with_passwords(server, [])
+            self.assertFalse(result["ok"])
+            self.assertIn("unix_listener", result["error"])
+            self.assertNotIn("密钥登录失败", result["error"])
+            install.assert_not_called()
+
+    def test_permission_denied_remains_an_authentication_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as state:
+            ssh = SshAccess(Path(state), Path(state), is_windows=False)
+            adapter = DeviceAdapter(ssh)
+            server = {"host": "198.51.100.1", "port": 22, "username": "root"}
+            denied = subprocess.CompletedProcess([], 255, "", "root@198.51.100.1: Permission denied (publickey).")
+            with (
+                mock.patch.object(ssh, "preflight", return_value={"ok": True}),
+                mock.patch.object(ssh, "ensure_key"),
+                mock.patch.object(ssh, "install_key_with_default_identity", return_value=False),
+                mock.patch("npu_top.ssh_access.subprocess.run", return_value=denied),
+            ):
+                result = adapter.bootstrap_with_passwords(server, [])
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["error"], "密钥登录失败，且未提供一次性密码")
 
     def test_password_bootstrap_delegates_to_external_command_via_stdin(self) -> None:
         with tempfile.TemporaryDirectory() as state:
@@ -246,7 +283,8 @@ class ProbeTests(unittest.TestCase):
             completed = subprocess.CompletedProcess([], 0, "", "")
             with (
                 mock.patch.object(ssh, "preflight", return_value={"ok": True}),
-                mock.patch.object(ssh, "key_auth_works", side_effect=[False, True]),
+                mock.patch.object(ssh, "check_key_auth", return_value=(False, None)),
+                mock.patch.object(ssh, "key_auth_works", return_value=True),
                 mock.patch.object(ssh, "install_key_with_default_identity", return_value=False),
                 mock.patch("npu_top.inventory.subprocess.run", return_value=completed) as run,
             ):
