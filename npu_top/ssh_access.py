@@ -109,7 +109,7 @@ class SshAccess:
             "-o", "ServerAliveCountMax=1",
         ]
         if not self.is_windows:
-            control_path = Path("data") / "ssh-control" / "%C"
+            control_path = Path("ssh-control") / "%C"
             command.extend([
                 "-o", "ControlMaster=auto",
                 "-o", "ControlPersist=90",
@@ -136,16 +136,26 @@ class SshAccess:
             "error": None if result.returncode == 0 else (result.stderr or "SSH configuration rejected")[-1000:],
         }
 
-    def key_auth_works(self, server: dict[str, Any]) -> bool:
+    def check_key_auth(self, server: dict[str, Any]) -> tuple[bool, str | None]:
         try:
             result = subprocess.run(
                 [*self.ssh_base(server), "true"], stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
                 timeout=12, check=False, cwd=self.working_dir,
             )
-        except (OSError, subprocess.TimeoutExpired):
-            return False
-        return result.returncode == 0
+        except subprocess.TimeoutExpired:
+            return False, "SSH 连接超时"
+        except OSError as exc:
+            return False, f"本地 SSH 启动失败：{exc.strerror or type(exc).__name__}"
+        if result.returncode == 0:
+            return True, None
+        error = " ".join(result.stderr.split())[-500:]
+        if "Permission denied" not in error or "unix_listener:" in error:
+            return False, f"SSH 连接失败：{error or f'exit {result.returncode}'}"
+        return False, None
+
+    def key_auth_works(self, server: dict[str, Any]) -> bool:
+        return self.check_key_auth(server)[0]
 
     def _default_identity_base(self, server: dict[str, Any]) -> list[str]:
         """ssh command that uses the invoking user's own default identities."""
