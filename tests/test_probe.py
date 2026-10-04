@@ -26,7 +26,8 @@ from npu_top.probe import (
     split_sections,
 )
 from npu_top.settings import Settings
-from npu_top.ssh_access import SshAccess
+from npu_top.ssh_access import KeyInstallResult, SshAccess
+from npu_top.db import Database
 
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -227,10 +228,15 @@ class ProbeTests(unittest.TestCase):
             ssh = SshAccess(Path(state), PROJECT)
             adapter = DeviceAdapter(ssh)
             server = {"host": "198.51.100.1", "port": 22, "username": "root"}
+            db = Database(Path(state) / "test.sqlite3")
+            db.initialize()
+            server = db.upsert_server({**server, "id": "one", "name": "one"})
+            adapter.bootstrap_state = db
+            self.addCleanup(db.close)
             with (
                 mock.patch.object(ssh, "preflight", return_value={"ok": True}),
                 mock.patch.object(ssh, "check_key_auth", return_value=(False, None)),
-                mock.patch.object(ssh, "install_key_with_default_identity", return_value=False),
+                mock.patch.object(ssh, "install_key_with_default_identity", return_value=KeyInstallResult("not_started", authentication_rejected=True)),
             ):
                 result = adapter.bootstrap_with_passwords(server, ["secret"])
         self.assertFalse(result["ok"])
@@ -261,11 +267,16 @@ class ProbeTests(unittest.TestCase):
             ssh = SshAccess(Path(state), Path(state), is_windows=False)
             adapter = DeviceAdapter(ssh)
             server = {"host": "198.51.100.1", "port": 22, "username": "root"}
+            db = Database(Path(state) / "test.sqlite3")
+            db.initialize()
+            server = db.upsert_server({**server, "id": "one", "name": "one"})
+            adapter.bootstrap_state = db
+            self.addCleanup(db.close)
             denied = subprocess.CompletedProcess([], 255, "", "root@198.51.100.1: Permission denied (publickey).")
             with (
                 mock.patch.object(ssh, "preflight", return_value={"ok": True}),
                 mock.patch.object(ssh, "ensure_key"),
-                mock.patch.object(ssh, "install_key_with_default_identity", return_value=False),
+                mock.patch.object(ssh, "install_key_with_default_identity", return_value=KeyInstallResult("not_started", authentication_rejected=True)),
                 mock.patch("npu_top.ssh_access.subprocess.run", return_value=denied),
             ):
                 result = adapter.bootstrap_with_passwords(server, [])
@@ -280,16 +291,22 @@ class ProbeTests(unittest.TestCase):
             )
             adapter = DeviceAdapter(ssh, key_bootstrap=bootstrap)
             server = {"host": "198.51.100.1", "port": 2222, "username": "ops"}
+            db = Database(Path(state) / "test.sqlite3")
+            db.initialize()
+            server = db.upsert_server({**server, "id": "one", "name": "one"})
+            adapter.bootstrap_state = db
+            self.addCleanup(db.close)
             completed = subprocess.CompletedProcess([], 0, "", "")
             with (
                 mock.patch.object(ssh, "preflight", return_value={"ok": True}),
-                mock.patch.object(ssh, "check_key_auth", return_value=(False, None)),
-                mock.patch.object(ssh, "key_auth_works", return_value=True),
-                mock.patch.object(ssh, "install_key_with_default_identity", return_value=False),
+                mock.patch.object(ssh, "check_key_auth", side_effect=[(False, None), (True, None)]),
+                mock.patch.object(ssh, "install_key_with_default_identity", return_value=KeyInstallResult("not_started", authentication_rejected=True)),
                 mock.patch("npu_top.inventory.subprocess.run", return_value=completed) as run,
             ):
                 result = adapter.bootstrap_with_passwords(server, ["one-time"])
-            self.assertEqual(result, {"ok": True, "method": "external-bootstrap", "attempts": 1})
+            receipt = result.pop("receipt")
+            self.assertEqual(receipt["state"], "verified")
+            self.assertEqual(result, {"ok": True, "method": "external-bootstrap", "attempts": 1, "installation": "completed", "state": "verified"})
             argv = run.call_args.args[0]
             self.assertEqual(argv[0], sys.executable)
             self.assertEqual(argv[1:], [

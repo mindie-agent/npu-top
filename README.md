@@ -19,6 +19,11 @@ CLI、MCP、HTTP、后台采集及 inventory 初始化使用零依赖的 `mindie
 和异常类型；等待新采样的调用立即得到不可用，不伪造成功。失败 probe 的耗时来自
 实际工作线程内的计时，不再写零或把排队时间当作探测时间。不会自动重放 bootstrap。
 
+明确配置的 inventory 缺失、损坏或含无效记录会阻止初始化，不能当作空清单或只导入
+其中一部分。后台导入失败同时出现在 health、普通列表和总览的 runtime，带本地诊断引用。
+已有 SQLite 主库缺失或结构损坏会保留现存文件并报错，不自动重建为空库。进程详情
+刷新失败保留有效 NPU 观测，但清除本次未确认的旧详情并返回不可用原因；详情时间单独标注。
+
 `npu-top diagnostics bundle --root PATH --output support.json` 仅离线导出严格字段
 投影与脱敏结果，不扫描宿主机、不启动服务、不上传原始 inventory、密码或命令。
 自动 issue 上报由独立启用的 reporter 负责；普通监控请求不等待网络上报。
@@ -46,7 +51,7 @@ uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.1.6/npu
 
 ### 开发者路径：从 git 构建（需要 Node.js 22.13+）
 
-`uvx --from git+…` 会在本机执行 hatch 构建。构建 hook 在缺少前端产物时会跑 `npm ci && npm run build`，没有 Node 会得到一个不含静态资源的 wheel，`npu-top serve` 会立刻报错而不是 404。
+`uvx --from git+…` 会在本机执行 hatch 构建。构建 hook 校验前端输入指纹、产物文件哈希及入口引用；只有与当前源码匹配的完整产物才会复用。缺失、陈旧或损坏的产物触发 `npm ci && npm run build`；缺少 npm 或必要静态文件时，wheel 构建明确失败。
 
 ```bash
 uvx --from git+https://github.com/mindie-agent/npu-top@main npu-top serve
@@ -102,7 +107,7 @@ cd npu-top
 - 历史报表覆盖 1 小时到 90 天，包含聚合趋势，以及按日期和 2 小时时段排列的 CPU、内存、NPU、HBM 与逐卡 AICore 热力图；原始数据默认保留 90 天。
 - 默认只监听 `127.0.0.1`，不含登录功能，也不应直接暴露到外网。
 - 为 Agent 提供统一 CLI/MCP：可按 IP/主机名选择缓存或实时探查，筛选观测到的空闲算力，并查询 NPU、CPU、内存、容器/进程归属及挂载盘；SSH 始终封装在常驻采集器内。结构化 JSON、`observation` 信封和完整参数见 [Agent CLI 与 MCP](docs/agent-access.md)。
-- Agent 的完整使用与决策约定随仓库保存在 [`.agents/skills/npu-top/SKILL.md`](.agents/skills/npu-top/SKILL.md)。
+- Agent 的完整使用和观测边界见 [Agent CLI 与 MCP](docs/agent-access.md)。
 
 ## 依赖与目录
 
@@ -113,7 +118,7 @@ npu_top/       Python 包：HTTP API、采集调度、npu-smi 解析、SSH、CLI
 npu_top/static/  前端构建产物（gitignore，由 npm run build 写入 wheel）
 app/            前端源码（Vite 静态 SPA）
 tests/          标准库 unittest，针对安装后的 npu_top 包
-scripts/        build_wheel.sh：npm ci && npm run build && uv build
+scripts/        build_wheel.sh：uv build（构建 hook 验证或生成前端产物）
 docs/           架构与 Agent 接口
 .agents/skills/ 随仓库分发的 Agent Skill
 ```
@@ -218,3 +223,6 @@ for rollback until service/API validation succeeds. Remove that legacy file only
 after validation to release disk space. A pre-existing migration staging or backup
 file stops migration so interrupted work can be inspected. Never run migration
 while a service or another database writer is active.
+
+
+密钥引导在现有 SQLite servers 记录中保留发送意图及“尚未开始、已完成、结果不确定”三种安装事实；不保存密码。完整旧版汇总数据库会事务升级到 schema 2，保留主机、历史及现有配置。重启、后台 inventory 导入或重复添加同一端点不会清除未决回执，也不会因换一组密码而重发。后续已有监控密钥登录成功可只读确认原结果并结束未决状态；登录失败本身不证明原写入未发生。安装已完成但登录验证失败时，不再次安装；SSH 断连或外部引导命令返回一般错误时，先核对远端结果。`NFM_BOOTSTRAP_COMMAND` 的退出码 0 表示安装完成，77 专用于写入前认证被拒绝（允许下一密码候选）；其他非零退出码表示写入结果不确定。引导命令默认无执行时限。已有本地密钥对不完整时保留文件并报告错误，不生成新的身份覆盖旧身份。

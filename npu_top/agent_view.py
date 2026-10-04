@@ -67,6 +67,7 @@ def _process(process: dict[str, Any], detailed: bool) -> dict[str, Any]:
             "cwd": process.get("cwd"),
             "command": process.get("command"),
             "executable": process.get("executable"),
+            "observed_at": process.get("details_observed_at"),
         })
     return {key: value for key, value in result.items() if value not in (None, [], "")}
 
@@ -171,6 +172,9 @@ def npu_status(
             "hbm_total_mb": summary.get("hbm_total_mb") or 0,
         },
         "devices": devices,
+        **({"recording": snapshot["recording"]} if snapshot and "recording" in snapshot else {}),
+        **({"process_details": (snapshot or {}).get("process_details", {"state": "not_observed"})}
+           if include_processes or detailed_processes else {}),
         **({"error": str((snapshot or {}).get("error") or server.get("last_error"))[-240:]} if compact["status"] == "offline" else {}),
     }
 

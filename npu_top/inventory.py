@@ -18,10 +18,21 @@ import sys
 from pathlib import Path
 from typing import Any, Protocol
 
-from .ssh_access import validate_endpoint
+from .ssh_access import KeyInstallResult, validate_endpoint
 
 
 LOW_PRIORITY_TAG = "低优先级"
+
+
+class InventoryError(ValueError):
+    """An explicitly configured source could not be read completely."""
+
+
+def _read_source(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise InventoryError(f"inventory source unavailable: {path} ({type(exc).__name__})") from exc
 
 
 class InventorySource(Protocol):
@@ -41,28 +52,32 @@ class MachineInventoryFile:
         self.path = Path(path)
 
     def servers(self) -> list[dict[str, Any]]:
-        if not self.path.is_file():
-            return []
         try:
-            machines = json.loads(self.path.read_text(encoding="utf-8")).get("machines", [])
-        except (OSError, json.JSONDecodeError, AttributeError):
-            return []
+            document = json.loads(_read_source(self.path))
+        except json.JSONDecodeError as exc:
+            raise InventoryError(f"invalid inventory JSON: {self.path}") from exc
+        if not isinstance(document, dict) or not isinstance(document.get("machines"), list):
+            raise InventoryError(f"inventory requires a machines array: {self.path}")
+        machines = document["machines"]
         servers: list[dict[str, Any]] = []
-        for machine in machines:
-            if not isinstance(machine, dict):
-                continue
-            host_data = machine.get("host") or {}
+        for index, machine in enumerate(machines, 1):
+            if not isinstance(machine, dict) or not isinstance(machine.get("host"), dict):
+                raise InventoryError(f"invalid inventory host at record {index}: {self.path}")
+            host_data = machine["host"]
             host = str(host_data.get("ip") or host_data.get("host") or "").strip()
             try:
                 port = int(host_data.get("port") or 22)
-            except (TypeError, ValueError):
-                continue
+            except (TypeError, ValueError) as exc:
+                raise InventoryError(f"invalid inventory port at record {index}: {self.path}") from exc
             username = str(host_data.get("user") or "root")
             try:
                 validate_endpoint(host, port, username)
-            except ValueError:
-                continue
-            machine_type = host_data.get("machine_type") or (machine.get("container") or {}).get("machine_type")
+            except ValueError as exc:
+                raise InventoryError(f"invalid inventory endpoint at record {index}: {self.path}") from exc
+            container = machine.get("container") or {}
+            if not isinstance(container, dict):
+                raise InventoryError(f"invalid inventory container at record {index}: {self.path}")
+            machine_type = host_data.get("machine_type") or container.get("machine_type")
             servers.append({
                 "name": str(machine.get("alias") or host), "host": host, "port": port,
                 "username": username, "tags": [str(machine_type)] if machine_type else [],
@@ -85,22 +100,17 @@ class HostPoolFile:
         self.username = username
 
     def servers(self) -> list[dict[str, Any]]:
-        if not self.path.is_file():
-            return []
-        try:
-            lines = self.path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return []
+        lines = _read_source(self.path).splitlines()
         servers: list[dict[str, Any]] = []
-        for line in lines:
+        for index, line in enumerate(lines, 1):
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
             host = stripped.split(maxsplit=1)[0]
             try:
                 validate_endpoint(host, self.port, self.username)
-            except ValueError:
-                continue
+            except ValueError as exc:
+                raise InventoryError(f"invalid host pool endpoint at line {index}: {self.path}") from exc
             servers.append({
                 "name": host, "host": host, "port": self.port, "username": self.username,
                 "tags": [LOW_PRIORITY_TAG], "workspace_enabled": False,
@@ -128,14 +138,16 @@ class ExternalKeyBootstrap:
 
     ``template`` is a shell-quoted command line whose ``{host}``, ``{port}``,
     ``{user}`` and ``{public_key_file}`` placeholders are substituted per
-    argument. The one-time password is written to the command's stdin followed
+    argument. Exit 77 is reserved for authentication rejection before any remote
+    write; only this outcome permits trying another password. Other nonzero
+    exits and interrupted calls have uncertain effects. The one-time password is written to the command's stdin followed
     by a newline; it is never placed in arguments or logs. Exit status 0 means
     the key was installed. ``{python}`` expands to the running interpreter.
     """
 
     PLACEHOLDERS = ("host", "port", "user", "public_key_file", "python")
 
-    def __init__(self, template: str, *, timeout: int = 35) -> None:
+    def __init__(self, template: str, *, timeout: int | None = None) -> None:
         self.argv_template = shlex.split(template)
         if not self.argv_template:
             raise ValueError("bootstrap command must not be empty")
@@ -154,7 +166,7 @@ class ExternalKeyBootstrap:
                 raise ValueError(f"unsupported placeholder in bootstrap command: {argument}") from exc
         return rendered
 
-    def run(self, server: dict[str, Any], public_key_file: Path, password: str) -> tuple[bool, str]:
+    def run(self, server: dict[str, Any], public_key_file: Path, password: str) -> KeyInstallResult:
         command = self.render(server, public_key_file)
         try:
             result = subprocess.run(
@@ -162,12 +174,17 @@ class ExternalKeyBootstrap:
                 text=True, timeout=self.timeout, check=False,
             )
         except subprocess.TimeoutExpired:
-            return False, "密码认证超时"
+            return KeyInstallResult("unknown", "密钥引导超过调用者时限；远端写入结果不确定，请先核对")
         except OSError as exc:
-            return False, f"无法执行密钥引导命令: {exc}"[-1000:]
+            return KeyInstallResult("not_started", f"无法执行密钥引导命令: {type(exc).__name__}")
         if result.returncode == 0:
-            return True, ""
-        return False, _safe_command_error(result.stdout, result.stderr)
+            return KeyInstallResult("completed")
+        if result.returncode == 77:
+            return KeyInstallResult("not_started", "密码认证被拒绝", authentication_rejected=True)
+        error = _safe_command_error(result.stdout, result.stderr)
+        if password:
+            error = error.replace(password, "[REDACTED]")
+        return KeyInstallResult("unknown", error)
 
 
 def _safe_command_error(stdout: str, stderr: str) -> str:

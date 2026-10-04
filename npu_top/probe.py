@@ -310,6 +310,7 @@ def attach_process_details(
                 "cwd": detail.get("cwd"),
                 "command": detail.get("command"),
                 "executable": detail.get("executable"),
+                "details_observed_at": detail.get("details_observed_at"),
                 "container": container,
                 "ownership_labels": extract_ownership_labels(
                     detail.get("cwd"), (container or {}).get("name"),
@@ -367,16 +368,25 @@ class HostProbe:
             result.stderr.decode("utf-8", errors="replace"),
         )
 
-    def _collect_process_details(self, server: dict[str, Any], pids: list[int]) -> dict[int, dict[str, Any]]:
+    def _collect_process_details(self, server: dict[str, Any], pids: list[int]) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
         if not pids:
-            return {}
+            return {}, {"state": "unchanged"}
         try:
             result = self._run_script(server, build_process_detail_script(pids), min(self.timeout, 15))
-        except (OSError, subprocess.TimeoutExpired):
-            return {}
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {}, {"state": "unavailable", "stage": "process_details", "error_type": type(exc).__name__}
         if result.returncode != 0:
-            return {}
-        return parse_process_details(split_sections(result.stdout).get("process_details", ""))
+            return {}, {"state": "unavailable", "stage": "process_details", "exit_code": result.returncode,
+                        "error": (result.stderr or "process detail probe failed")[-800:]}
+        sections = split_sections(result.stdout)
+        if "process_details" not in sections:
+            return {}, {"state": "unavailable", "stage": "process_details", "error": "probe response missing process_details"}
+        observed_at = int(time.time())
+        details = parse_process_details(sections["process_details"])
+        for detail in details.values():
+            detail["details_observed_at"] = observed_at
+        # A process can exit between the device sample and /proc lookup.
+        return details, {"state": "observed", "observed_at": observed_at}
 
     def collect(self, server: dict[str, Any], include_infrastructure: bool) -> dict[str, Any]:
         started = time.monotonic()
@@ -434,7 +444,11 @@ class HostProbe:
         })
         process_cache = self._process_cache.setdefault(server_id, {})
         stale_pids = active_pids if include_infrastructure else [pid for pid in active_pids if pid not in process_cache]
-        process_cache.update(self._collect_process_details(server, stale_pids))
+        details, detail_status = self._collect_process_details(server, stale_pids)
+        # A failed refresh cannot relabel old PID metadata as newly observed.
+        for pid in stale_pids:
+            process_cache.pop(pid, None)
+        process_cache.update(details)
         self._process_cache[server_id] = {pid: process_cache[pid] for pid in active_pids if pid in process_cache}
         attach_process_details(devices, self._process_cache[server_id], infrastructure["docker"])
 
@@ -456,6 +470,7 @@ class HostProbe:
             "server_id": server_id, "collected_at": int(time.time()), "duration_ms": duration_ms,
             "hostname": sections.get("hostname") or server["name"], "summary": summary,
             "devices": devices, **infrastructure,
+            "process_details": detail_status,
         }
 
 

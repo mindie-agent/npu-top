@@ -41,6 +41,7 @@ class AdaptiveScheduler:
         self._manual: set[str] = set()
         self._force_infrastructure: set[str] = set()
         self._fatal_error: str | None = None
+        self._maintenance_error: dict | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -135,6 +136,9 @@ class AdaptiveScheduler:
                 "collector_status": ("failed" if self._fatal_error else "stopped" if self._stop.is_set()
                                      else "running" if self._thread and self._thread.is_alive() else "not_started"),
                 "collector_error_type": self._fatal_error,
+                "storage_failures": sum(snapshot.get("recording", {}).get("state") == "failed"
+                                        for snapshot in self._snapshots.values()),
+                "maintenance_error": self._maintenance_error,
             }
 
     def snapshots(self) -> dict[str, dict[str, Any]]:
@@ -182,10 +186,13 @@ class AdaptiveScheduler:
             if time.monotonic() >= prune_at:
                 try:
                     self.db.prune(self.settings.retention_days)
+                    self._maintenance_error = None
                 except sqlite3.OperationalError as exc:
                     if getattr(exc, "sqlite_errorcode", None) not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_FULL):
                         raise
                     logging.exception("History maintenance busy or full; retrying next hour")
+                    self._maintenance_error = {"state": "failed", "error_type": type(exc).__name__,
+                                               "sqlite_errorcode": getattr(exc, "sqlite_errorcode", None)}
                 prune_at = time.monotonic() + 3600
 
     def _collect_cycle(self, targets: set[str], force_infrastructure: set[str] | None = None) -> None:
@@ -213,14 +220,16 @@ class AdaptiveScheduler:
                     failed_at = int(time.time())
                     persist_failure = failed_at - self._latest_failure_event.get(server["id"], 0) >= self.settings.history_interval
                     duration_ms = exc.duration_ms if isinstance(exc, _ProbeFailure) else None
-                    self.db.record_failure(server["id"], str(exc), duration_ms, persist_failure)
-                    if persist_failure:
+                    storage = self._record_observation(lambda: self.db.record_failure(
+                        server["id"], str(exc), duration_ms, persist_failure))
+                    if persist_failure and storage["state"] == "recorded":
                         self._latest_failure_event[server["id"]] = failed_at
                     with self._condition:
                         self._snapshots[server["id"]] = {
                             "server_id": server["id"], "collected_at": int(time.time()),
                             "status": "offline", "error": str(exc)[-1200:],
                             "probe_duration_ms": duration_ms,
+                            "recording": storage,
                         }
                         self._condition.notify_all()
                     continue
@@ -228,13 +237,29 @@ class AdaptiveScheduler:
                     self._last_infra[server["id"]] = time.monotonic()
                 last_persisted = self._latest_persisted.get(server["id"], 0)
                 persist = int(snapshot["collected_at"]) - last_persisted >= self.settings.history_interval
-                self.db.record_success(server["id"], snapshot, persist)
-                if persist:
+                storage = self._record_observation(lambda: self.db.record_success(server["id"], snapshot, persist))
+                if persist and storage["state"] == "recorded":
                     self._latest_persisted[server["id"]] = int(snapshot["collected_at"])
                 snapshot["status"] = "online"
+                snapshot["recording"] = {**storage, "history_requested": persist}
                 with self._condition:
                     self._snapshots[server["id"]] = snapshot
                     self._condition.notify_all()
+
+    @staticmethod
+    def _record_observation(write) -> dict:
+        # The probe has already completed. Storage failure must neither erase
+        # its result nor advance the persisted-sample cursor.
+        with get_recorder("npu-top").operation("top.observation.record", level="DEBUG") as diagnostic:
+            try:
+                write()
+            except Exception as exc:
+                diagnostic.fail("observation_record_failed", exception=exc)
+                return {"state": "failed", "error_type": type(exc).__name__,
+                        "sqlite_errorcode": getattr(exc, "sqlite_errorcode", None),
+                        "additional_failures": list(getattr(exc, "__notes__", [])),
+                        "diagnostic_ref": diagnostic.summary()["operation_id"]}
+        return {"state": "recorded"}
 
     def _collect_one(self, server, include_infra):
         # Measure within the actual worker, excluding time queued in the pool.

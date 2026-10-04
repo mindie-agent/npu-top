@@ -11,6 +11,8 @@ def capture_failure(error, category="internal_error"):
     operation = _ACTIVE.get()
     if operation is not None:
         operation.fail(category, exception=error)
+        return operation.summary()["operation_id"]
+    return None
 
 
 def record_http_status(status):

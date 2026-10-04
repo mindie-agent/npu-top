@@ -99,6 +99,10 @@ def format_npu(payload: dict[str, Any], ultra_compact: bool = False) -> str:
     )
     if payload.get("error"):
         headline += f" error={payload['error']}"
+    if payload.get("recording", {}).get("state") == "failed":
+        headline += " history_recording=failed"
+    if payload.get("process_details", {}).get("state") == "unavailable":
+        headline += " process_details=unavailable"
     if ultra_compact or not payload.get("devices"):
         return headline
     lines = [headline]
@@ -115,6 +119,13 @@ def format_npu(payload: dict[str, Any], ultra_compact: bool = False) -> str:
 
 def format_servers(payload: dict[str, Any]) -> str:
     rows = []
+    runtime = payload.get("runtime", {})
+    if runtime.get("inventory", {}).get("state") == "failed":
+        rows.append("inventory_import=failed; configured fleet may be incomplete")
+    if runtime.get("storage_failures") or runtime.get("maintenance_error"):
+        rows.append("history_recording=failed; current observations do not establish saved history")
+    if runtime.get("collector_status") in {"failed", "stopped"}:
+        rows.append(f"collector={runtime['collector_status']}")
     for server in payload.get("servers") or []:
         age = "-" if server.get("age_seconds") is None else f"{server['age_seconds']}s"
         rows.append(
