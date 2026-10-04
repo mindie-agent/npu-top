@@ -11,6 +11,7 @@ import os
 import re
 import shlex
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,15 @@ def validate_endpoint(host: str, port: int, username: str) -> None:
         raise ValueError("SSH 用户名包含不支持的字符")
     if port < 1 or port > 65535:
         raise ValueError("SSH 端口必须在 1 到 65535 之间")
+
+
+@dataclass(frozen=True)
+class KeyInstallResult:
+    state: str
+    error: str | None = None
+    authentication_rejected: bool = False
+    receipt: dict[str, Any] | None = None
+    recording_error: str | None = None
 
 
 class SshAccess:
@@ -57,6 +67,8 @@ class SshAccess:
         if self.private_key.exists() and self.public_key.exists():
             self._secure_key_permissions()
             return self.private_key
+        if self.private_key.exists() or self.public_key.exists():
+            raise RuntimeError("监控 SSH 密钥对不完整；保留现有密钥，请核对后恢复配对文件")
         self.private_key.parent.mkdir(parents=True, exist_ok=True)
         result = subprocess.run(
             ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "npu-fleet-monitor", "-f", str(self.private_key)],
@@ -167,28 +179,36 @@ class SshAccess:
             "-p", str(server["port"]), f"{server['username']}@{server['host']}",
         ]
 
-    def install_key_with_default_identity(self, server: dict[str, Any]) -> bool:
-        """Append the monitor public key using an already trusted identity."""
+    def install_key_with_default_identity(self, server: dict[str, Any]) -> KeyInstallResult:
+        """Preserve the write outcome separately from later key verification."""
         try:
             check = subprocess.run(
                 [*self._default_identity_base(server), "true"], stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=12, check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=12, check=False,
                 cwd=self.working_dir,
             )
-            if check.returncode != 0:
-                return False
-            public_key = self.public_key.read_text(encoding="utf-8").strip()
-            quoted = shlex.quote(public_key)
-            remote = (
-                "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys; "
-                "chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys; "
-                f"grep -qxF {quoted} ~/.ssh/authorized_keys 2>/dev/null || printf '%s\\n' {quoted} >> ~/.ssh/authorized_keys"
-            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return KeyInstallResult("not_started", f"默认身份连接检查失败：{type(exc).__name__}")
+        if check.returncode != 0:
+            error = " ".join(check.stderr.split())[-500:]
+            rejected = "Permission denied" in error
+            return KeyInstallResult("not_started", error or f"SSH exit {check.returncode}", rejected)
+        public_key = self.public_key.read_text(encoding="utf-8").strip()
+        quoted = shlex.quote(public_key)
+        remote = (
+            "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && "
+            "chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys && "
+            f"(grep -qxF {quoted} ~/.ssh/authorized_keys; code=$?; "
+            f"case $code in 0) ;; 1) printf '%s\\n' {quoted} >> ~/.ssh/authorized_keys ;; *) exit $code ;; esac)"
+        )
+        try:
             install = subprocess.run(
                 [*self._default_identity_base(server), "sh", "-c", shlex.quote(remote)], stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=15, check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, check=False,
                 cwd=self.working_dir,
             )
-            return install.returncode == 0 and self.key_auth_works(server)
-        except (OSError, subprocess.TimeoutExpired):
-            return False
+        except OSError as exc:
+            return KeyInstallResult("not_started", f"无法启动密钥安装：{type(exc).__name__}")
+        if install.returncode == 0:
+            return KeyInstallResult("completed")
+        return KeyInstallResult("unknown", "密钥安装未获完整成功确认；请先核对远端授权文件")

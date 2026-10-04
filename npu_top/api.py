@@ -18,7 +18,7 @@ from .agent_view import (
     AgentQueryError, capacity_candidates, compact_server, find_server, npu_status, observation_envelope,
     server_status,
 )
-from .db import Database
+from .db import AuthorityStateError, Database
 from .device_adapter import DeviceAdapter
 from .scheduler import AdaptiveScheduler
 from .settings import Settings
@@ -51,8 +51,14 @@ class App:
         self.settings = settings
         self.db = db
         self.adapter = adapter
+        if isinstance(self.adapter, DeviceAdapter):
+            self.adapter.bootstrap_state = db
         self.scheduler = scheduler
         self.web_root = static_dir()
+        self.inventory_state: dict[str, Any] = {"state": "not_configured"}
+
+    def runtime_state(self) -> dict[str, Any]:
+        return {**self.scheduler.runtime_state(), "inventory": dict(self.inventory_state)}
 
     def overview(self) -> dict[str, Any]:
         servers = self.db.list_servers()
@@ -80,7 +86,7 @@ class App:
                     utils.append(float(summary["npu_util_percent"]))
         totals["npu_util_percent"] = round(sum(utils) / len(utils), 1) if utils else None
         totals["idle_npu_count"] = totals["npu_count"] - totals["busy_npu_count"]
-        return {"generated_at": int(time.time()), "totals": totals, "servers": rows, "runtime": self.scheduler.runtime_state()}
+        return {"generated_at": int(time.time()), "totals": totals, "servers": rows, "runtime": self.runtime_state()}
 
     def agent_servers(self) -> dict[str, Any]:
         snapshots = self.scheduler.snapshots()
@@ -90,6 +96,7 @@ class App:
             "source": "cache",
             "observation": observation_envelope(oldest),
             "servers": servers,
+            "runtime": self.runtime_state(),
         }
 
     def _agent_snapshot(
@@ -210,14 +217,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         try:
             self._get()
-        except sqlite3.OperationalError:
-            self.json_response({"error": "Storage busy; retry later"}, HTTPStatus.SERVICE_UNAVAILABLE)
+        except (sqlite3.Error, AuthorityStateError, OSError) as exc:
+            code = getattr(exc, "sqlite_errorcode", 0)
+            busy = code & 255 in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+            reference = capture_failure(exc, "storage_busy" if busy else "storage_failed")
+            self.json_response({"error": "Storage busy; retry later" if busy else "Monitor storage failed",
+                                "error_type": type(exc).__name__, "diagnostic_ref": reference},
+                               HTTPStatus.SERVICE_UNAVAILABLE if busy else HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def _get(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/health":
-            runtime = self.app.scheduler.runtime_state()
-            healthy = runtime.get("collector_status", "running") == "running"
+            runtime = self.app.runtime_state()
+            healthy = (runtime.get("collector_status", "running") == "running"
+                       and runtime["inventory"]["state"] != "failed"
+                       and not runtime.get("storage_failures") and not runtime.get("maintenance_error"))
             return self.json_response({
                 "status": "ok" if healthy else "degraded", "version": __version__, "contract": "observation-only",
                 "runtime": runtime,
@@ -325,6 +339,15 @@ class Handler(BaseHTTPRequestHandler):
 
     @observed("top.http.put", level="DEBUG")
     def do_PUT(self) -> None:  # noqa: N802
+        try:
+            self._put()
+        except Exception as exc:
+            reference = capture_failure(exc, "server_update_failed")
+            self.json_response({"error": "Settings update was not confirmed; check current state before retrying",
+                                "operation_state": "unconfirmed", "error_type": type(exc).__name__,
+                                "diagnostic_ref": reference}, 500)
+
+    def _put(self) -> None:
         parsed = urlparse(self.path)
         try:
             viewer = re.fullmatch(r"/api/viewers/([A-Za-z0-9_-]{8,80})", parsed.path)
@@ -349,13 +372,29 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("至少提供 enabled 或 tags")
                 if not self.app.db.update_server(server.group(1), enabled=enabled, tags=tags):
                     return self.json_response({"error": "server not found"}, HTTPStatus.NOT_FOUND)
-                return self.json_response({"ok": True, "server": self.app.db.get_server(server.group(1))})
+                try:
+                    saved = self.app.db.get_server(server.group(1))
+                except Exception as exc:
+                    reference = capture_failure(exc, "updated_server_readback_failed")
+                    return self.json_response({"ok": False, "operation_completed": True,
+                                               "error": "Server settings saved; readback failed",
+                                               "server_id": server.group(1), "diagnostic_ref": reference}, 500)
+                return self.json_response({"ok": True, "server": saved})
         except ValueError as exc:
             return self.json_response({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         self.json_response({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     @observed("top.http.delete")
     def do_DELETE(self) -> None:  # noqa: N802
+        try:
+            self._delete()
+        except Exception as exc:
+            reference = capture_failure(exc, "server_delete_failed")
+            self.json_response({"error": "Removal was not confirmed; check current state before retrying",
+                                "operation_state": "unconfirmed", "error_type": type(exc).__name__,
+                                "diagnostic_ref": reference}, 500)
+
+    def _delete(self) -> None:
         parsed = urlparse(self.path)
         viewer = re.fullmatch(r"/api/viewers/([A-Za-z0-9_-]{8,80})", parsed.path)
         if viewer:
@@ -375,7 +414,10 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(passwords, list) or len(passwords) > 20 or not all(isinstance(item, str) for item in passwords):
             raise ValueError("passwords 最多包含 20 个字符串候选")
         results = []
-        for entry in entries:
+        for index, entry in enumerate(entries):
+            receipt = {"input_index": index, "server": None, "registration": "not_started",
+                       "auth": {"ok": False, "state": "not_started"}}
+            stage = "validate"
             try:
                 if not isinstance(entry, dict):
                     raise ValueError("服务器条目必须是对象")
@@ -383,24 +425,37 @@ class Handler(BaseHTTPRequestHandler):
                 port = int(entry.get("port", 22))
                 username = str(entry.get("username", "root")).strip()
                 self.app.adapter.validate_endpoint(host, port, username)
+                tags = normalize_tags(entry.get("tags", []))
+                stage = "register"
                 server = self.app.db.upsert_server({
                     "id": uuid.uuid4().hex, "name": str(entry.get("name") or host).strip()[:120],
-                    "host": host, "port": port, "username": username,
-                    "tags": normalize_tags(entry.get("tags", [])),
+                    "host": host, "port": port, "username": username, "tags": tags,
                 })
+                receipt.update(server=server, registration="completed")
+                stage = "bootstrap"
                 with get_recorder("npu-top").operation("top.server.bootstrap") as operation:
                     auth = self.app.adapter.bootstrap_with_passwords(server, passwords)
+                    receipt["auth"] = auth
                     if not auth["ok"]:
                         operation.fail("bootstrap_failed", detail=auth.get("error"))
                 if auth["ok"]:
+                    stage = "schedule_observation"
                     self.app.scheduler.collect_now(server["id"])
                 else:
+                    stage = "record_auth_failure"
                     self.app.db.record_failure(server["id"], str(auth.get("error")),
                                                operation.summary()["duration_ms"])
-                results.append({"server": server, "auth": auth})
             except Exception as exc:  # noqa: BLE001
-                capture_failure(exc, "server_registration_failed")
-                results.append({"server": entry, "auth": {"ok": False, "error": str(exc)}})
+                reference = capture_failure(exc, "server_registration_failed")
+                receipt["failure"] = {"stage": stage, "error_type": type(exc).__name__,
+                                      "error": str(exc), "diagnostic_ref": reference}
+                if stage == "register":
+                    receipt["registration"] = "unknown"
+                elif stage == "bootstrap":
+                    receipt["auth"] = {"ok": False, "state": "unknown", "error": str(exc)}
+                elif stage == "validate":
+                    receipt["auth"]["error"] = str(exc)
+            results.append(receipt)
         self.json_response({"results": results}, HTTPStatus.MULTI_STATUS)
 
     def _static(self, request_path: str) -> None:

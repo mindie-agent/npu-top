@@ -18,10 +18,10 @@ def main():
     path = args.database.resolve()
     pending = path.with_name(path.name + '.rollup-building')
     backup = path.with_name(path.name + '.legacy')
-    if pending.exists() or backup.exists():
+    if pending.exists() or pending.with_name(pending.name + '.owner').exists() or backup.exists():
         raise SystemExit('Migration staging/backup exists; inspect before retrying')
     # The caller must stop all service processes first.
-    source = sqlite3.connect(path)
+    source = sqlite3.connect(path.as_uri() + '?mode=rw', uri=True)
     source.row_factory = sqlite3.Row
     if not source.execute("SELECT 1 FROM sqlite_master WHERE name='host_samples'").fetchone():
         raise SystemExit('Already migrated; no action needed')
@@ -67,6 +67,7 @@ def main():
         os.fsync(handle.fileno())
     path.rename(backup)
     pending.rename(path)
+    dest.marker.replace(path.with_name(path.name + '.owner'))
     print(json.dumps(dict(status='migrated',samples=done,old_bytes=backup.stat().st_size,new_bytes=path.stat().st_size,rollback=str(backup))), flush=True)
 
 if __name__ == '__main__':

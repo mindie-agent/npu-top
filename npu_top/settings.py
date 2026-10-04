@@ -10,9 +10,12 @@ def _number(name: str, default: int, minimum: int) -> int:
     if raw is None:
         return default
     try:
-        return max(minimum, int(raw))
-    except ValueError:
-        return default
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer >= {minimum}") from exc
+    if value < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    return value
 
 
 def _paths(name: str) -> tuple[Path, ...]:

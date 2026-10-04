@@ -6,6 +6,11 @@ import threading
 import time
 import logging
 import math
+import os
+import stat
+import errno
+import uuid
+from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -24,6 +29,7 @@ CREATE TABLE IF NOT EXISTS servers (
   updated_at INTEGER NOT NULL,
   last_seen_at INTEGER,
   last_error TEXT,
+  bootstrap_receipt_json TEXT,
   UNIQUE(host, port, username)
 );
 """
@@ -46,6 +52,40 @@ def rollup_schema(table: str, metrics: tuple[str, ...], device: bool = False) ->
 SCHEMA += rollup_schema("host_rollups", HOST_METRICS) + rollup_schema("device_rollups", DEVICE_METRICS, True)
 
 
+OWNER_MARKER = "npu-top/store/1\n"
+SCHEMA_VERSION = 2
+
+
+def schema_shape(connection):
+    result = {}
+    for table in ("servers", "host_rollups", "device_rollups"):
+        columns = [tuple(row) for row in connection.execute(f"PRAGMA table_info({table})")]
+        foreign_keys = [tuple(row) for row in connection.execute(f"PRAGMA foreign_key_list({table})")]
+        indexes = sorted((row[1] if row[3] == "c" else row[3], row[2], row[4],
+                          tuple(tuple(item)[1:] for item in connection.execute(f'PRAGMA index_info("{row[1]}")')))
+                         for row in connection.execute(f"PRAGMA index_list({table})"))
+        result[table] = (columns, foreign_keys, indexes)
+    return result
+
+
+_model = sqlite3.connect(":memory:")
+try:
+    _model.executescript(SCHEMA)
+    REQUIRED_SCHEMA = schema_shape(_model)
+finally:
+    _model.close()
+_model = sqlite3.connect(":memory:")
+try:
+    _model.executescript(SCHEMA.replace("  bootstrap_receipt_json TEXT,\n", ""))
+    PREVIOUS_SCHEMA = schema_shape(_model)
+finally:
+    _model.close()
+
+
+class AuthorityStateError(RuntimeError):
+    """Host registration/history authority cannot be read safely."""
+
+
 def bounded_history(method):
     @wraps(method)
     def query(self, *args, **kwargs):
@@ -64,37 +104,163 @@ def bounded_history(method):
     return query
 
 
+@contextmanager
+def initialization_lock(path):
+    fd = os.open(str(path) + ".init.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise RuntimeError("monitor initialization lock is not a regular file")
+        if os.name == "nt":
+            import msvcrt
+            while True:
+                try:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError as exc:
+                    if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                        raise
+                    time.sleep(.01)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def write_owner_marker(path):
+    with path.open("x", encoding="ascii") as handle:
+        os.chmod(path, 0o600)
+        handle.write(OWNER_MARKER)
+        handle.flush()
+        os.fsync(handle.fileno())
+    if os.name != "nt":
+        fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
 class Database:
     def __init__(self, path: Path, max_bytes: int = 1024 * 1024 * 1024) -> None:
-        self.path = path
+        self.path = Path(path)
+        self.marker = self.path.with_name(self.path.name + ".owner")
         self.max_bytes = max_bytes
         self._write_lock = threading.RLock()
         self._history_slots = threading.BoundedSemaphore(2)
         self._local = threading.local()
 
+    def _state_file(self):
+        identities = []
+        for path in (self.path, self.marker):
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                raise AuthorityStateError(f"monitor authority file is missing: {path}") from None
+            if not stat.S_ISREG(info.st_mode):
+                raise AuthorityStateError(f"monitor authority is not a regular file: {path}")
+            identities.append((info.st_dev, info.st_ino))
+            if path == self.path and not info.st_size:
+                raise AuthorityStateError("monitor database is empty; state was not rebuilt")
+        try:
+            valid_marker = self.marker.read_text(encoding="ascii") == OWNER_MARKER
+        except (OSError, UnicodeError) as exc:
+            raise AuthorityStateError("monitor database ownership marker is unreadable") from exc
+        if not valid_marker:
+            raise AuthorityStateError("monitor database ownership marker is invalid")
+        return tuple(identities)
+
+    @staticmethod
+    def _validate_schema(connection):
+        if (connection.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION
+                or schema_shape(connection) != REQUIRED_SCHEMA):
+            raise AuthorityStateError("monitor database schema is incomplete or unsupported; state was not rebuilt")
+
     def connection(self) -> sqlite3.Connection:
+        identity = self._state_file()
+        if identity != getattr(self, "_identity", identity):
+            raise AuthorityStateError("monitor database or ownership marker was replaced while running; existing connection was not reused")
         connection = getattr(self._local, "connection", None)
         if connection is None:
-            connection = sqlite3.connect(self.path, timeout=15, check_same_thread=False)
-            connection.row_factory = sqlite3.Row
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA foreign_keys=ON")
-            page_size = connection.execute("PRAGMA page_size").fetchone()[0]
-            connection.execute(f"PRAGMA max_page_count={max(1, self.max_bytes // page_size)}")
-            connection.execute("PRAGMA journal_size_limit=8388608")
-            connection.execute("PRAGMA cache_size=-2048")
-            connection.execute("PRAGMA busy_timeout=15000")
-            self._local.connection = connection
+            connection = sqlite3.connect(self.path.resolve().as_uri() + "?mode=rw", uri=True,
+                                         timeout=15, check_same_thread=False)
+            try:
+                connection.row_factory = sqlite3.Row
+                self._validate_schema(connection)
+                if self._state_file() != identity:
+                    raise AuthorityStateError("monitor database changed while opening")
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute("PRAGMA foreign_keys=ON")
+                page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+                connection.execute(f"PRAGMA max_page_count={max(1, self.max_bytes // page_size)}")
+                connection.execute("PRAGMA journal_size_limit=8388608")
+                connection.execute("PRAGMA cache_size=-2048")
+                connection.execute("PRAGMA busy_timeout=15000")
+                self._local.schema_version = connection.execute("PRAGMA schema_version").fetchone()[0]
+                self._local.connection = connection
+            except BaseException:
+                connection.close()
+                raise
+        elif connection.execute("PRAGMA schema_version").fetchone()[0] != self._local.schema_version:
+            self._validate_schema(connection)
+            self._local.schema_version = connection.execute("PRAGMA schema_version").fetchone()[0]
+        # user_version can change without changing SQLite's schema counter.
+        if connection.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+            raise AuthorityStateError("monitor database schema version changed while running")
         return connection
 
     def initialize(self) -> None:
-        connection = self.connection()
-        legacy = connection.execute("SELECT 1 FROM sqlite_master WHERE name='host_samples'").fetchone()
-        if legacy:
-            raise RuntimeError("Legacy history requires offline migrate-history.py before startup")
-        connection.executescript(SCHEMA)
-        connection.execute("PRAGMA optimize")
-        connection.commit()
+        with initialization_lock(self.path):
+            self._initialize_locked()
+
+    def _initialize_locked(self) -> None:
+        marker_value = OWNER_MARKER
+        for path in (self.path, self.marker):
+            try:
+                mode = path.lstat().st_mode
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(mode):
+                raise RuntimeError(f"monitor state is not a regular file: {path}")
+        if self.marker.exists() and self.marker.read_text(encoding="ascii") != marker_value:
+            raise RuntimeError("monitor database ownership marker is invalid")
+        fresh = not self.path.exists()
+        if fresh:
+            residue = [Path(str(self.path) + suffix) for suffix in ("-wal", "-shm", "-journal", ".legacy", ".rollup-building", ".rollup-building.owner")]
+            if self.path.name == "monitor.sqlite3":
+                residue += [self.path.parent / "keys" / "id_ed25519", self.path.parent / "keys" / "id_ed25519.pub",
+                            self.path.parent / "known_hosts"]
+            if self.marker.exists() or any(path.exists() or path.is_symlink() for path in residue):
+                raise RuntimeError("monitor database is missing from existing state; retained files were not changed")
+            # Exclusive marker precedes initialization. Interrupted creation
+            # remains visible instead of becoming a second first use.
+            write_owner_marker(self.marker)
+            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
+        connection = sqlite3.connect(self.path.resolve().as_uri() + "?mode=rw", uri=True, timeout=15)
+        try:
+            legacy = connection.execute("SELECT 1 FROM sqlite_master WHERE name='host_samples'").fetchone()
+            if legacy:
+                raise RuntimeError("Legacy history requires offline migrate-history.py before startup")
+            if fresh:
+                connection.executescript("BEGIN IMMEDIATE;" + SCHEMA + f"PRAGMA user_version={SCHEMA_VERSION};COMMIT;")
+            else:
+                # Only the complete prior schema may acquire the new receipt
+                # column. Missing constraints/tables are never migrations.
+                with connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    version = connection.execute("PRAGMA user_version").fetchone()[0]
+                    if version in (0, 1) and schema_shape(connection) == PREVIOUS_SCHEMA:
+                        connection.execute("ALTER TABLE servers ADD COLUMN bootstrap_receipt_json TEXT")
+                        connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                    self._validate_schema(connection)
+            if not self.marker.exists():
+                write_owner_marker(self.marker)
+            self._identity = self._state_file()
+        finally:
+            connection.close()
 
     def close(self) -> None:
         """Release this thread's connection, including Windows file handles."""
@@ -107,7 +273,21 @@ class Database:
     def _server(row: sqlite3.Row) -> dict[str, Any]:
         result = dict(row)
         result["enabled"] = bool(result["enabled"])
-        result["tags"] = json.loads(result.pop("tags_json") or "[]")
+        try:
+            result["tags"] = json.loads(result.pop("tags_json"))
+            receipt = result.pop("bootstrap_receipt_json")
+            result["bootstrap_receipt"] = json.loads(receipt) if receipt else None
+            if not isinstance(result["tags"], list) or any(not isinstance(tag, str) for tag in result["tags"]):
+                raise ValueError("invalid saved tags")
+            if receipt:
+                saved = result["bootstrap_receipt"]
+                if (not isinstance(saved, dict) or not isinstance(saved.get("operation_id"), str)
+                        or saved.get("state") not in {"sending", "unknown", "completed", "not_started", "verified"}
+                        or saved.get("method") not in {"default-identity", "external-bootstrap"}
+                        or type(saved.get("attempts")) is not int):
+                    raise ValueError("invalid saved bootstrap receipt")
+        except (TypeError, ValueError) as exc:
+            raise AuthorityStateError("monitor server metadata or bootstrap receipt is invalid; state was preserved") from exc
         return result
 
     def list_servers(self) -> list[dict[str, Any]]:
@@ -121,24 +301,25 @@ class Database:
     def upsert_server(self, server: dict[str, Any]) -> dict[str, Any]:
         now = int(time.time())
         connection = self.connection()
-        connection.execute(
-            """
-            INSERT INTO servers(id, name, host, port, username, tags_json, enabled, created_at, updated_at)
-            VALUES(?, ?, ?, ?, ?, ?, 1, ?, ?)
-            ON CONFLICT(host, port, username) DO UPDATE SET
-              name=excluded.name, tags_json=excluded.tags_json, enabled=1, updated_at=excluded.updated_at
-            """,
-            (
-                server["id"], server["name"], server["host"], server["port"], server["username"],
-                json.dumps(server.get("tags", []), ensure_ascii=False), now, now,
-            ),
-        )
-        connection.commit()
-        row = connection.execute(
-            "SELECT * FROM servers WHERE host=? AND port=? AND username=?",
-            (server["host"], server["port"], server["username"]),
-        ).fetchone()
-        return self._server(row)
+        with connection:
+            connection.execute(
+                """
+                INSERT INTO servers(id, name, host, port, username, tags_json, enabled, created_at, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, 1, ?, ?)
+                ON CONFLICT(host, port, username) DO UPDATE SET
+                  name=excluded.name, tags_json=excluded.tags_json, enabled=1, updated_at=excluded.updated_at
+                """,
+                (
+                    server["id"], server["name"], server["host"], server["port"], server["username"],
+                    json.dumps(server.get("tags", []), ensure_ascii=False), now, now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM servers WHERE host=? AND port=? AND username=?",
+                (server["host"], server["port"], server["username"]),
+            ).fetchone()
+            result = self._server(row)
+            return result
 
     def set_server_enabled(self, server_id: str, enabled: bool) -> bool:
         return self.update_server(server_id, enabled=enabled)
@@ -159,17 +340,45 @@ class Database:
             assignments.append("tags_json=?")
             values.append(json.dumps(tags, ensure_ascii=False))
         values.append(server_id)
-        cursor = self.connection().execute(
-            f"UPDATE servers SET {', '.join(assignments)} WHERE id=?",
-            values,
-        )
-        self.connection().commit()
+        connection = self.connection()
+        with connection:
+            cursor = connection.execute(f"UPDATE servers SET {', '.join(assignments)} WHERE id=?", values)
         return cursor.rowcount > 0
 
     def delete_server(self, server_id: str) -> bool:
-        cursor = self.connection().execute("DELETE FROM servers WHERE id=?", (server_id,))
-        self.connection().commit()
+        connection = self.connection()
+        with connection:
+            cursor = connection.execute("DELETE FROM servers WHERE id=?", (server_id,))
         return cursor.rowcount > 0
+
+    def bootstrap_receipt(self, server_id):
+        server = self.get_server(server_id)
+        if server is None:
+            raise ValueError("bootstrap server is not registered")
+        return server["bootstrap_receipt"]
+
+    def reserve_bootstrap(self, server_id, method, attempts):
+        connection = self.connection()
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            receipt = self.bootstrap_receipt(server_id)
+            if receipt and receipt["state"] in {"sending", "unknown", "completed"}:
+                return False, receipt
+            receipt = {"operation_id": uuid.uuid4().hex, "state": "sending", "method": method,
+                       "attempts": attempts, "at": int(time.time())}
+            connection.execute("UPDATE servers SET bootstrap_receipt_json=? WHERE id=?", (json.dumps(receipt), server_id))
+        return True, receipt
+
+    def finish_bootstrap(self, server_id, operation_id, state):
+        connection = self.connection()
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            receipt = self.bootstrap_receipt(server_id)
+            if receipt is None or receipt["operation_id"] != operation_id:
+                raise RuntimeError("bootstrap receipt identity changed; remote action was not repeated")
+            receipt = {**receipt, "state": state, "at": int(time.time())}
+            connection.execute("UPDATE servers SET bootstrap_receipt_json=? WHERE id=?", (json.dumps(receipt), server_id))
+        return receipt
 
 
     @staticmethod
@@ -231,7 +440,11 @@ class Database:
                 if getattr(exc, "sqlite_errorcode", None) != sqlite3.SQLITE_FULL:
                     raise
                 logging.error("History capacity exhausted; skipping sample and reclaiming oldest summaries")
-                self.prune(90, pressure=True)
+                try:
+                    self.prune(90, pressure=True)
+                except Exception as cleanup:
+                    exc.add_note(f"history reclamation also failed: {type(cleanup).__name__}")
+                raise
 
     def record_failure(self, server_id: str, error: str, duration_ms: float | None, persist_event: bool = True) -> None:
         # Only current failure state is needed by the UI; no unbounded event log.
