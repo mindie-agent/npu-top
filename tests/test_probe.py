@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import subprocess
 import sys
@@ -224,7 +225,7 @@ class ProbeTests(unittest.TestCase):
             self.assertIsNone(adapter.key_bootstrap)
 
     def test_password_bootstrap_requires_configured_command(self) -> None:
-        with tempfile.TemporaryDirectory() as state:
+        with tempfile.TemporaryDirectory() as state, contextlib.ExitStack() as resources:
             ssh = SshAccess(Path(state), PROJECT)
             adapter = DeviceAdapter(ssh)
             server = {"host": "198.51.100.1", "port": 22, "username": "root"}
@@ -232,7 +233,7 @@ class ProbeTests(unittest.TestCase):
             db.initialize()
             server = db.upsert_server({**server, "id": "one", "name": "one"})
             adapter.bootstrap_state = db
-            self.addCleanup(db.close)
+            resources.callback(db.close)
             with (
                 mock.patch.object(ssh, "preflight", return_value={"ok": True}),
                 mock.patch.object(ssh, "check_key_auth", return_value=(False, None)),
@@ -263,7 +264,7 @@ class ProbeTests(unittest.TestCase):
             install.assert_not_called()
 
     def test_permission_denied_remains_an_authentication_failure(self) -> None:
-        with tempfile.TemporaryDirectory() as state:
+        with tempfile.TemporaryDirectory() as state, contextlib.ExitStack() as resources:
             ssh = SshAccess(Path(state), Path(state), is_windows=False)
             adapter = DeviceAdapter(ssh)
             server = {"host": "198.51.100.1", "port": 22, "username": "root"}
@@ -271,7 +272,7 @@ class ProbeTests(unittest.TestCase):
             db.initialize()
             server = db.upsert_server({**server, "id": "one", "name": "one"})
             adapter.bootstrap_state = db
-            self.addCleanup(db.close)
+            resources.callback(db.close)
             denied = subprocess.CompletedProcess([], 255, "", "root@198.51.100.1: Permission denied (publickey).")
             with (
                 mock.patch.object(ssh, "preflight", return_value={"ok": True}),
@@ -284,7 +285,7 @@ class ProbeTests(unittest.TestCase):
             self.assertEqual(result["error"], "密钥登录失败，且未提供一次性密码")
 
     def test_password_bootstrap_delegates_to_external_command_via_stdin(self) -> None:
-        with tempfile.TemporaryDirectory() as state:
+        with tempfile.TemporaryDirectory() as state, contextlib.ExitStack() as resources:
             ssh = SshAccess(Path(state), PROJECT)
             bootstrap = ExternalKeyBootstrap(
                 "{python} tool.py install --host {host} --host-port {port} --user {user} --public-key-file {public_key_file}",
@@ -295,7 +296,7 @@ class ProbeTests(unittest.TestCase):
             db.initialize()
             server = db.upsert_server({**server, "id": "one", "name": "one"})
             adapter.bootstrap_state = db
-            self.addCleanup(db.close)
+            resources.callback(db.close)
             completed = subprocess.CompletedProcess([], 0, "", "")
             with (
                 mock.patch.object(ssh, "preflight", return_value={"ok": True}),

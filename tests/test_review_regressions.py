@@ -1,6 +1,7 @@
 """Acceptance of the real authority, credential, HTTP and import failure paths."""
 import contextlib
 import json
+import os
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -24,12 +25,26 @@ def initialized(path):
     return db, server
 
 
+def remove_or_replace_authority(db, mutate):
+    try:
+        mutate()
+    except PermissionError as exc:
+        if os.name != "nt" or exc.winerror not in (5, 32):
+            raise
+        # Windows itself prevents unlinking/replacing an open SQLite file.
+        # Verify that protection, then exercise loss between connections on
+        # the same Database instance. POSIX still tests a cached live handle.
+        assert db.list_servers()
+        db.close()
+        mutate()
+
+
 @pytest.mark.parametrize("fault", ["missing", "marker", "marker-replacement", "table", "replacement", "version"])
 def test_cached_connection_cannot_return_or_modify_obsolete_authority(tmp_path, fault):
     db, _ = initialized(tmp_path / "monitor.sqlite3")
     assert db.list_servers()
     if fault == "missing":
-        db.path.unlink()
+        remove_or_replace_authority(db, db.path.unlink)
     elif fault == "marker":
         db.marker.write_text("broken")
     elif fault == "marker-replacement":
@@ -40,7 +55,7 @@ def test_cached_connection_cannot_return_or_modify_obsolete_authority(tmp_path, 
         # A same-schema replacement must not make the open old inode current.
         replacement, _ = initialized(tmp_path / "replacement")
         replacement.close()
-        replacement.path.replace(db.path)
+        remove_or_replace_authority(db, lambda: replacement.path.replace(db.path))
     else:
         with contextlib.closing(sqlite3.connect(db.path)) as connection:
             connection.execute("DROP TABLE device_rollups" if fault == "table" else "PRAGMA user_version=99")
