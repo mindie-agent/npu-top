@@ -152,26 +152,25 @@ class Database:
         self._history_slots = threading.BoundedSemaphore(2)
         self._local = threading.local()
 
-    def _state_file(self, *, require_marker=True):
+    def _state_file(self):
+        identities = []
         for path in (self.path, self.marker):
             try:
                 info = path.lstat()
             except FileNotFoundError:
-                if path == self.marker and not require_marker:
-                    continue
                 raise AuthorityStateError(f"monitor authority file is missing: {path}") from None
             if not stat.S_ISREG(info.st_mode):
                 raise AuthorityStateError(f"monitor authority is not a regular file: {path}")
+            identities.append((info.st_dev, info.st_ino))
+            if path == self.path and not info.st_size:
+                raise AuthorityStateError("monitor database is empty; state was not rebuilt")
         try:
             valid_marker = self.marker.read_text(encoding="ascii") == OWNER_MARKER
         except (OSError, UnicodeError) as exc:
             raise AuthorityStateError("monitor database ownership marker is unreadable") from exc
         if not valid_marker:
             raise AuthorityStateError("monitor database ownership marker is invalid")
-        info = self.path.stat()
-        if not info.st_size:
-            raise AuthorityStateError("monitor database is empty; state was not rebuilt")
-        return info.st_dev, info.st_ino
+        return tuple(identities)
 
     @staticmethod
     def _validate_schema(connection):
@@ -182,7 +181,7 @@ class Database:
     def connection(self) -> sqlite3.Connection:
         identity = self._state_file()
         if identity != getattr(self, "_identity", identity):
-            raise AuthorityStateError("monitor database was replaced while running; existing connection was not reused")
+            raise AuthorityStateError("monitor database or ownership marker was replaced while running; existing connection was not reused")
         connection = getattr(self._local, "connection", None)
         if connection is None:
             connection = sqlite3.connect(self.path.resolve().as_uri() + "?mode=rw", uri=True,

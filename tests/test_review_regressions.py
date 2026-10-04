@@ -24,7 +24,7 @@ def initialized(path):
     return db, server
 
 
-@pytest.mark.parametrize("fault", ["missing", "marker", "table", "replacement", "version"])
+@pytest.mark.parametrize("fault", ["missing", "marker", "marker-replacement", "table", "replacement", "version"])
 def test_cached_connection_cannot_return_or_modify_obsolete_authority(tmp_path, fault):
     db, _ = initialized(tmp_path / "monitor.sqlite3")
     assert db.list_servers()
@@ -32,6 +32,10 @@ def test_cached_connection_cannot_return_or_modify_obsolete_authority(tmp_path, 
         db.path.unlink()
     elif fault == "marker":
         db.marker.write_text("broken")
+    elif fault == "marker-replacement":
+        marker = db.marker.with_suffix(".replacement")
+        marker.write_bytes(db.marker.read_bytes())
+        marker.replace(db.marker)
     elif fault == "replacement":
         # A same-schema replacement must not make the open old inode current.
         replacement, _ = initialized(tmp_path / "replacement")
