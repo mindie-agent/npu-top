@@ -140,7 +140,6 @@ All external inputs are configured explicitly via environment variables (see [`.
 | System Architecture & Collection | [docs/architecture.zh.md](./docs/architecture.zh.md) | [docs/architecture.md](./docs/architecture.md) |
 | Agent CLI & MCP Reference | [docs/agent-access.md](./docs/agent-access.md) | [docs/agent-access.en.md](./docs/agent-access.en.md) |
 | Ascend 950 (A5) Probing & Parsing | [docs/a5-probing.zh.md](./docs/a5-probing.zh.md) | [docs/a5-probing.md](./docs/a5-probing.md) |
-| Bundled Agent Skill | [.agents/skills/npu-top/SKILL.md](./.agents/skills/npu-top/SKILL.md) | [.agents/skills/npu-top/SKILL.md](./.agents/skills/npu-top/SKILL.md) |
 
 ---
 
