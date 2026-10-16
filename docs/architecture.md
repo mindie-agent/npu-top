@@ -1,5 +1,7 @@
 # Architecture
 
+[中文](./architecture.zh.md) · **English** · [Back to Documentation Index](./README.en.md)
+
 ```text
 Browser (127.0.0.1:8788)
   ├─ static dashboard + history + server onboarding
