@@ -1,5 +1,7 @@
 # Agent CLI 与 MCP
 
+**中文** · [English](./agent-access.en.md) · [返回文档中心](./README.md)
+
 `npu-top` 将 Agent 查询统一交给本机 `npu-top serve` 进程。默认 `cache` 模式立即读取内存快照，不建立 SSH；显式 `live` 模式由采集器发起一次集中探查并等待新快照。Agent 无需自行拼接 SSH 命令，也不会接触远程密码或监控密钥。
 
 ## 只观测，不分配

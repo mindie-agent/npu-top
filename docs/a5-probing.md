@@ -1,5 +1,7 @@
 # Ascend 950 (A5) NPU probing
 
+[中文](./a5-probing.zh.md) · **English** · [Back to Documentation Index](./README.en.md)
+
 The monitor parses the single-ID four-column `npu-smi info` table with its bundled parser. Captured `26.2.0.b007` outputs from four Ascend950DT hosts are regression fixtures under `tests/fixtures/a5-*.txt`.
 
 The first row supplies device ID, name, health, power and temperature. The continuation row supplies bus ID (which may be `NA`), NPU utilization, memory and HBM. Process rows contain a device ID and host PID, with an optional container PID; no chip ID is synthesized.
