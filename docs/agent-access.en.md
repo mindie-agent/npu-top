@@ -1,14 +1,18 @@
-# Agent CLI & MCP Access
+# Agent CLI & MCP Tools Guide
 
 [中文](./agent-access.md) · **English** · [Back to Documentation Index](./README.en.md)
 
-`npu-top` routes all Agent queries through the local `npu-top serve` process. The default `cache` mode reads in-memory snapshots immediately without opening SSH connections; the explicit `live` mode asks the collector to perform a fresh probe and waits for the updated snapshot. Agents never construct raw SSH commands or touch remote passwords or monitoring keys.
+To let AI coding agents (Claude Code, Codex, Kimi Code, Cursor, etc.) inspect cluster state safely, `npu-top` routes all agent queries through your local `npu-top serve` process:
 
-## Observation-Only Contract
+- **Instant `cache` Mode (Default)**: Returns the latest in-memory snapshot in milliseconds without opening a new SSH connection;
+- **On-Demand `live` Mode**: Asks the collector to run a fresh SSH probe and returns the updated snapshot;
+- **Zero Credential Exposure**: Agents talk only to `127.0.0.1:8788` — they never build raw SSH commands or touch remote passwords or monitoring keys.
 
-`npu-top` is an **observability surface**, not a device-allocation authority. Every response describes the host state observed at `observed_at` and may become stale at any moment. Which NPUs a workload may use is decided by the host-side NPU coordinator queue; `npu-top` neither tracks nor grants reservations or leases.
+---
 
-Every `/api/agent/*` response, CLI JSON payload, and MCP `structuredContent` therefore includes the same `observation` envelope:
+## 1. Understanding the `observation` Envelope
+
+Because `npu-top` is a **read-only traffic monitor** rather than a resource scheduler, every `/api/agent/*` response, CLI `--json` output, and MCP `structuredContent` payload includes an `observation` envelope:
 
 ```json
 "observation": {
@@ -21,23 +25,42 @@ Every `/api/agent/*` response, CLI JSON payload, and MCP `structuredContent` the
 }
 ```
 
-For `capacity` / `find_npu_capacity`, `kind` is `observed_availability` and `observed_at` is the oldest snapshot relied upon by the candidate list (each candidate also carries its own `observed_at`). Treat `idle_npu_count` and `busy` as "last observed idle/busy" and request actual device leases through the coordinator. HTTP responses also carry `X-MindIE-Top-Contract: observation-only` and `/api/health` returns `contract: observation-only`.
+- `age_seconds: 4` tells you the snapshot is 4 seconds old;
+- `allocation_authority: false` reminds callers that seeing `idle_npu_count: 4` means "4 cards looked idle 4 seconds ago," not that those cards are reserved for you. Always request actual device leases through `mindie-coordinator`.
 
-## CLI Usage
+---
+
+## 2. Quick CLI Cheat Sheet
 
 ```bash
+# List all monitored servers
 npu-top servers
+
+# View per-card busy/idle state, AICore, HBM, and process owners from cache
 npu-top npu 192.0.2.21
+
+# Trigger an immediate live SSH probe for fresh NPU state
 npu-top npu 192.0.2.21 --live
+
+# Ultra-compact output for tight context windows
 npu-top npu 192.0.2.21 --ultra-compact
+
+# Structured JSON output with process PIDs, working directories, and command lines
 npu-top --json npu 192.0.2.21 --processes
+npu-top --json npu 192.0.2.21 --process-details
+
+# Full server status (NPU + CPU + RAM + disks + Docker containers; defaults to live probe)
 npu-top status 192.0.2.21
 npu-top status 192.0.2.21 --cache
+
+# Inspect disk mounts and candidate model-weight folders
 npu-top mounts 192.0.2.21 --live
+
+# Find A3 servers observed within the last 180s with at least 4 idle NPUs
 npu-top capacity --min-idle 4 --max-age 180 --tag A3
 ```
 
-Default human-readable output stays concise—reporting connectivity, cache age, busy/total cards, AICore utilization, HBM, process count, and owner:
+Default text output is concise and token-efficient:
 
 ```text
 192.0.2.21 online age=4s npu=8 busy=2 util=24.5% hbm=96.0G/512.0G
@@ -45,15 +68,15 @@ Default human-readable output stays concise—reporting connectivity, cache age,
 1 idle util=0% hbm=5.9G/64.0G proc=0 owner=-
 ```
 
-- Pass `--json` for structured output.
-- Pass `--processes` for compact process records, or `--process-details` to include working directory and command line.
-- Pass `--max-age 180` to bound acceptable cache staleness (exits with code `3` when exceeded while still printing the snapshot).
-- `status` defaults to a live probe; pass `status HOST --cache` to read from cache.
-- The default API endpoint is `http://127.0.0.1:8788` (configurable via `--url` or `MINDIE_TOP_URL`; non-loopback URLs are rejected by default).
+**Helpful Flags**:
+- Pass `--max-age 180` to enforce cache freshness; if the snapshot is older than 180 seconds, `npu-top` still prints the snapshot but exits with code `3`.
+- The default API URL is `http://127.0.0.1:8788` (configurable via `--url` or `MINDIE_TOP_URL`; non-loopback URLs are rejected by default for safety).
 
-## MCP Tools
+---
 
-The MCP server runs over stdio and queries the same loopback API:
+## 3. MCP Tools for AI Coding Agents
+
+Register `npu-top` in `.mcp.json`:
 
 ```json
 {
@@ -67,17 +90,23 @@ The MCP server runs over stdio and queries the same loopback API:
 }
 ```
 
-Five read-only tools are exposed, each declaring the observation-only contract:
+This exposes 5 read-only MCP tools:
 
-- `npu_status(host, mode?, include_processes?, process_details?, max_age_seconds?)`
-- `server_status(host, mode?, process_details?, timeout_seconds?)`
-- `list_mounts(host, mode?, timeout_seconds?)`
-- `find_npu_capacity(min_idle_npus?, max_age_seconds?, tags?, include_disabled?)`
-- `list_npu_servers()`
+| MCP Tool | Arguments | When to Use It |
+| --- | --- | --- |
+| `list_npu_servers()` | *(none)* | Get a quick overview of all monitored servers and their idle/busy card counts |
+| `find_npu_capacity(...)` | `min_idle_npus?`, `max_age_seconds?`, `tags?`, `include_disabled?` | Shortlist candidate servers with enough idle NPUs and matching tags (low-priority hosts are ranked last) |
+| `npu_status(...)` | `host`, `mode?`, `include_processes?`, `process_details?`, `max_age_seconds?` | Inspect per-card AICore utilization, HBM usage, and owning processes on a host |
+| `server_status(...)` | `host`, `mode?`, `process_details?`, `timeout_seconds?` | Inspect full host health: NPUs, CPU, RAM, disks, Docker containers, and process owners |
+| `list_mounts(...)` | `host`, `mode?`, `timeout_seconds?` | Check filesystem mounts and free capacity to find where model weights live |
 
-Use `mode=cache` for fast candidate screening and `mode=live` for a final pre-request check before asking the coordinator for devices.
+> **Recommended Workflow**: Use `mode="cache"` for fast initial screening, run `mode="live"` on your chosen candidate for a final pre-flight check, and then submit your workload through `mindie-coordinator`.
 
-## Read-Only Loopback HTTP API
+---
+
+## 4. Loopback HTTP Endpoints
+
+Custom local scripts can also query the read-only loopback endpoints directly:
 
 ```text
 GET /api/agent/servers
@@ -87,4 +116,4 @@ GET /api/agent/server?host=192.0.2.21&mode=cache
 GET /api/agent/capacity?min_idle_npus=4&max_age_seconds=180&tags=A3
 ```
 
-`host` matches the server IP, display name, remote hostname, or internal ID. If multiple SSH endpoints share the same address, the server returns an explicit ambiguity error rather than guessing. (`192.0.2.x` addresses above are RFC 5737 documentation examples.)
+`host` matches the server IP, display name, remote `hostname`, or internal ID (if multiple SSH endpoints share the same IP, an explicit ambiguity error is returned instead of guessing). *Note: `192.0.2.x` addresses above are RFC 5737 documentation examples.*

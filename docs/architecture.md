@@ -1,64 +1,71 @@
-# Architecture
+# System Architecture, Polling Tiers & Busy Detection
 
 [中文](./architecture.zh.md) · **English** · [Back to Documentation Index](./README.en.md)
 
-```text
-Browser (127.0.0.1:8788)
-  ├─ static dashboard + history + server onboarding
-  └─ same-origin /api/*
-        ↓ loopback only, single process
-npu-top serve (HTTP API + AdaptiveScheduler)
-  ├─ viewer leases: fastest of 1s / 5s / 10s / 30s
-  ├─ idle fallback: 120s
-  ├─ history write floor: 30s
-  ├─ infrastructure cadence: 60s
-  └─ bounded parallel host probes
-        ↓ project Ed25519 + OpenSSH multiplexing
-Bare-metal NPU hosts
-  ├─ npu-smi info + usages
-  ├─ /proc/stat, /proc/loadavg, /proc/meminfo
-  ├─ df + findmnt
-  └─ docker ps + docker info
+`npu-top` is designed as a lightweight, single-process local monitor that gives you a live web dashboard and 90-day historical heatmaps across multiple Ascend servers while serving instant read-only queries to local AI coding agents.
+
+```mermaid
+flowchart TB
+    Browser["🌐 Local Browser (127.0.0.1:8788)<br/>Live Dashboard · 90-Day Heatmaps · Batch Onboarding"]
+    Agent["🤖 AI Agent (npu-top CLI / MCP)<br/>Instant Cache Screening · On-Demand Live Probes"]
+    Core["⚙️ npu-top serve (Single Process)<br/>AdaptiveScheduler + Bounded SQLite WAL History"]
+    SSH["🔑 SshAccess (Dedicated Ed25519 Key + ControlPersist Multiplexing)"]
+    Host["🖥️ Bare-Metal Ascend NPU Hosts<br/>npu-smi · /proc/stat · df/findmnt · docker ps"]
+
+    Browser -->|"Same-origin /api/*"| Core
+    Agent -->|"Loopback /api/agent/*"| Core
+    Core -->|"Bounded parallel thread pool"| SSH
+    SSH -->|"Agentless SSH probes"| Host
 ```
 
-## Host access and inventory
+---
 
-`DeviceAdapter` (`npu_top/device_adapter.py`) is the composition root for everything that touches a host. It is assembled from injected parts and holds no knowledge of where the monitor is installed or which project manages the fleet:
+## 1. Host Access & Inventory Merging
 
-- `SshAccess` owns the monitor's dedicated Ed25519 key, its isolated `known_hosts`, and the OpenSSH options used for probes.
-- `npu_smi` parses `npu-smi info` and `npu-smi info -t usages` output. It is bundled and unit-tested here; no external parser is imported at runtime.
-- Inventory sources are explicit files supplied through configuration: `NFM_INVENTORY_FILES` (JSON `{"machines": [...]}` documents whose host endpoint fields are read) and `NFM_HOST_POOL_FILES` (plain host lists, first field only). Nothing is discovered by walking parent directories or Git common directories.
-- `ExternalKeyBootstrap` runs the optional `NFM_BOOTSTRAP_COMMAND` template to install the monitor public key with a one-time password passed on stdin. Without it, password onboarding is unavailable and only key-based access works.
+Everything that talks to a remote host is wired together in `DeviceAdapter` (`npu_top/device_adapter.py`):
 
-At startup, the configured sources are merged in order. Active inventory records provide aliases and hardware tags. Addresses found only in a host pool are still inserted and probed, but receive the derived `低优先级` tag. Adjacent authentication columns in pool files never enter application state. User-defined tags are stored in the existing `servers.tags_json` column and the derived priority tag is reconciled on each service start.
+- **Dedicated SSH Key & Isolated State (`SshAccess`)**: Manages a dedicated Ed25519 key pair and an isolated `known_hosts` file inside `NFM_STATE_DIR` without touching your personal `~/.ssh/config`.
+- **Bundled `npu-smi` Parser (`npu_smi`)**: Parses `npu-smi info` and `npu-smi info -t usages` outputs directly with comprehensive unit tests covering 910B, A3 (910C), and A5 (950) layouts.
+- **Explicit Inventory Files**:
+  - `NFM_INVENTORY_FILES`: JSON machine inventory files (`{"machines": [...]}`) providing display aliases and hardware tags.
+  - `NFM_HOST_POOL_FILES`: Plain-text host lists (only the first column is read; any adjacent credential columns are ignored, and hosts found only in pool files automatically get the `低优先级` low-priority tag).
+  - `npu-top` **never walks parent folders or Git directories to guess machine lists.**
+- **Zero-Plaintext Key Onboarding (`ExternalKeyBootstrap`)**: When `NFM_BOOTSTRAP_COMMAND` is configured, batch onboarding pipes one-time password candidates over `stdin` in memory to install the monitor's public key. **Passwords are never stored in SQLite tables, config files, CLI flags, or logs.**
 
-Inventory says which hosts exist. It does not say which devices may be used; see "Observation-only contract" below.
+---
 
-## Observation-only contract
+## 2. Why `npu-top` Is Strictly Observation-Only
 
-npu-top observes. It is not a device-allocation authority and must not be used to decide which NPUs a workload may take. Three places describe the same devices in a typical deployment: this monitor, the host-side NPU coordinator queue, and the machine inventory. Only the coordinator queue grants devices; the inventory says which hosts exist; the monitor reports what a host looked like when it was last probed.
+In a shared Ascend environment, three components have distinct jobs:
+1. **Machine Inventory**: Lists which servers exist;
+2. **`npu-top`**: Reports what a server looked like when it was last probed (`observed_at`);
+3. **Host Coordinator (`mindie-coordinator`)**: The sole authority that grants NPU leases and service ports to workloads.
 
-The contract is made explicit in the interface rather than left to documentation:
+Because a monitoring snapshot can become outdated the moment another user starts a job, `npu-top` makes its observation-only boundary explicit across every interface:
+- Every `/api/agent/*` payload includes an `observation` envelope with `observed_at`, `age_seconds`, `allocation_authority: false`, and a clear notice.
+- `/api/agent/capacity` reports `kind: observed_availability`, stamps `observed_at` with the oldest snapshot used to build the shortlist, and reminds callers that idle counts are not reservations.
+- Every `/api/` response carries the `X-MindIE-Top-Contract: observation-only` HTTP header, and `/api/health` reports `contract: observation-only`.
+- All 5 MCP tool descriptions and the CLI help text end with this same reminder (enforced by `tests/test_agent_cli_mcp.py`).
 
-- Every `/api/agent/*` payload carries an `observation` envelope (`agent_view.observation_envelope`) with `kind`, `observed_at`, `observed_at_iso`, `age_seconds`, `allocation_authority: false` and a human-readable `notice`. `compact_server` rows and capacity candidates carry their own `observed_at`.
-- `/api/agent/capacity` uses `kind: observed_availability`; its `observed_at` is the oldest snapshot the list relied on, and its notice states that idle counts are not reservations.
-- All `/api/` responses send `X-MindIE-Top-Contract: observation-only`; `/api/health` reports `contract: observation-only`.
-- Every MCP tool description and the CLI help end with the same statement; `tests/test_agent_cli_mcp.py` fails if a tool drops it.
+---
 
-Fields that are inherently allocation-shaped and therefore deserve extra care in consumers: `busy` / `busy_npu_count` / `idle_npu_count` (derived from processes, AICore and an HBM threshold at probe time), the `capacity` endpoint and `find_npu_capacity` tool (a ranked shortlist), and the derived `低优先级` tag (inventory membership, not a policy grant). The monitor does not integrate with the coordinator and does not know about leases; it keeps these fields because they are useful observations, and labels them so they cannot be mistaken for grants.
+## 3. Adaptive Multi-Tier Polling & How "Busy" Cards Are Detected
 
-## Collection tiers
+- **Fast While You Watch, Quiet When Idle**:
+  - While a browser tab is open, `npu-top` polls at the fastest active viewer lease (`1s` / `5s` / `10s` / `30s`);
+  - When no browser tab is open, polling drops back to **120 seconds**;
+  - Disk mounts (`df` / `findmnt`) and Docker containers (`docker ps`) are cached on a separate **60-second** cadence;
+  - CPU usage is computed from consecutive `/proc/stat` counter deltas, so **remote SSH probes never need to `sleep`**.
+- **When Is an NPU Card Marked `busy`?**
+  An NPU is marked `busy` if any of the following hold at probe time:
+  1. The host `npu-smi` process table lists an owning process on that card;
+  2. AICore utilization is above `1%`;
+  3. HBM usage exceeds `NFM_HBM_BUSY_THRESHOLD_MB` (default `8192 MB`). Why 8 GB? Because idle A3 (910C) cards hold roughly 6 GB of resident driver HBM per card — setting the fallback threshold at 8192 MB catches hidden cross-container memory usage without falsely marking idle A3 cards as busy.
+- **No Overlapping Cycles & Cross-Platform SSH**:
+  A new polling cycle is scheduled only after the previous cycle finishes, preventing SSH backlog buildup. On Linux and macOS, `ControlPersist` reuses authenticated SSH sockets under a short path; on native Windows, unsupported Unix-domain socket options are omitted automatically and generated private keys receive a current-user-only Windows ACL.
 
-Fast collection reads CPU counters, load, memory and NPU state. CPU percentage is calculated from consecutive `/proc/stat` counters, so the probe does not sleep remotely. Infrastructure collection is separately cached because Docker and mount inspection are more expensive.
+---
 
-An NPU is busy when the host process table reports an owner, AICore utilization exceeds 1%, or HBM exceeds the configurable fallback threshold. The default is 8192 MB because the observed A3 fleet carries roughly 6 GB of idle driver HBM per device; the fallback therefore catches opaque cross-container occupancy without classifying driver overhead as a workload.
+## 4. SQLite Persistence & Heatmap Aggregation
 
-Each cycle is non-overlapping: a new cycle is scheduled only after the previous one finishes. Host probes run in a bounded thread pool, and OpenSSH `ControlPersist` reuses authenticated connections. Its control socket uses a short path under the state directory so a deeply nested checkout cannot exceed the Unix-domain socket path limit. If a 1-second cycle cannot finish within one second, the system naturally runs at the achievable rate instead of creating a backlog.
-
-On native Windows, the OpenSSH client does not use Unix-domain control sockets, so `ControlMaster`, `ControlPersist`, and `ControlPath` are omitted while all other host-key, identity, timeout, and keepalive controls remain active. The generated private key receives an explicit current-user-only Windows ACL.
-
-## Persistence
-
-SQLite runs in WAL mode. The primary history index is `(server_id, collected_at DESC)`, matching server-range reports, with a second time index for retention cleanup and fleet reports. Detailed snapshots are stored as JSON alongside summary columns used by aggregate queries. The heatmap endpoint groups summary columns and `payload_json.devices` with SQLite JSON functions into timezone-aligned two-hour buckets, so the UI can render both server-level and per-NPU activity without loading raw samples into the browser.
-
-Passwords are deliberately absent from every schema. The API accepts them only for the duration of a batch request and passes one candidate at a time to the configured bootstrap command through stdin.
+SQLite runs in WAL mode with history writes throttled to at most once every 30 seconds. The heatmap endpoint uses SQLite JSON functions to group 15-minute summaries and per-device metrics into timezone-aligned **2-hour buckets**, allowing the browser to render server-level and per-NPU 90-day heatmaps without downloading raw sample payloads.

@@ -2,12 +2,12 @@
 
 [中文](./README.md) · **English** · [Back to Project Homepage](../README.en.md)
 
-This directory contains the architecture overview, observation-only contract, Agent CLI / MCP interface specifications, and Ascend NPU probing notes for `npu-top`.
+Welcome to the `npu-top` documentation hub. Here you will find guides on the collection architecture, the read-only CLI and MCP interfaces for AI agents, and Ascend NPU output parsing.
 
-## Documents
+## Guides & References
 
-| Document | 中文 | English | Summary |
+| Topic | 中文 | English | What You'll Learn |
 | --- | --- | --- | --- |
-| System Architecture & Collection | [architecture.zh.md](./architecture.zh.md) | [architecture.md](./architecture.md) | Host SSH access, inventory merging, observation-only contract, collection tiers, and SQLite persistence |
-| Agent CLI & MCP Reference | [agent-access.md](./agent-access.md) | [agent-access.en.md](./agent-access.en.md) | `observation` envelope schema, CLI commands, 5 read-only MCP tools, and loopback HTTP endpoints |
-| Ascend 950 (A5) Probing & Parsing | [a5-probing.zh.md](./a5-probing.zh.md) | [a5-probing.md](./a5-probing.md) | Single-ID four-column `npu-smi info` parsing and regression fixtures for Ascend 950 (A5) hosts |
+| System Architecture & Polling Tiers | [architecture.zh.md](./architecture.zh.md) | [architecture.md](./architecture.md) | How agentless SSH collection works, how busy/idle NPU cards are classified, and why `npu-top` is strictly observation-only |
+| Agent CLI & MCP Tools Guide | [agent-access.md](./agent-access.md) | [agent-access.en.md](./agent-access.en.md) | How AI agents use the 5 read-only MCP tools and CLI commands to screen idle servers, inspect processes, and check disk mounts |
+| Ascend 950 (A5) Probing & Parsing | [a5-probing.zh.md](./a5-probing.zh.md) | [a5-probing.md](./a5-probing.md) | How `npu-top` parses the single-ID four-column `npu-smi info` layout on Ascend 950 (A5) servers |

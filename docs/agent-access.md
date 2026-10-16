@@ -1,14 +1,18 @@
-# Agent CLI 与 MCP
+# Agent CLI 与 MCP 查卡工具详解
 
 **中文** · [English](./agent-access.en.md) · [返回文档中心](./README.md)
 
-`npu-top` 将 Agent 查询统一交给本机 `npu-top serve` 进程。默认 `cache` 模式立即读取内存快照，不建立 SSH；显式 `live` 模式由采集器发起一次集中探查并等待新快照。Agent 无需自行拼接 SSH 命令，也不会接触远程密码或监控密钥。
+为了让 AI 编程助手（Claude Code、Codex、Kimi Code、Cursor 等）也能随时查服务器状态，`npu-top` 把所有查询统一收口到了本地运行的 `npu-top serve` 服务上：
 
-## 只观测，不分配
+- **默认读内存缓存（`cache` 模式）**：毫秒级直接返回采集器最近一次拍下的内存快照，不发起新的 SSH 连接；
+- **按需实时刷新（`live` 模式）**：当你准备跑大任务、想再确认一眼最新状态时，加上 `--live`（或 `mode="live"`），由后台采集器统一去做一次实时探测并返回最新结果；
+- **零密码暴露**：AI Agent 全程只跟本地 `127.0.0.1:8788` 通信，不需要自己拼复杂的 `ssh` 命令，也绝不会接触远端服务器密码或监控私钥。
 
-npu-top 是**观测面**，不是设备分配权威。每个响应描述的都是采集器在 `observed_at` 那一刻看到的主机状态，随时可能过期。哪些 NPU 可以被使用，由宿主机侧的 NPU 协调器队列决定；npu-top 不知道也不表达任何预约、租约或授权。
+---
 
-因此所有 `/api/agent/*` 响应、CLI JSON 和 MCP `structuredContent` 都带有同一个 `observation` 信封：
+## 1. 读懂返回结果里的 `observation` 信封
+
+`npu-top` 是**只读路况监控**，不是分卡调度器。因此无论是调 `/api/agent/*`、用 CLI `--json` 还是调 MCP 工具，返回结果里都会带上同一个 `observation` 信封：
 
 ```json
 "observation": {
@@ -21,23 +25,42 @@ npu-top 是**观测面**，不是设备分配权威。每个响应描述的都�
 }
 ```
 
-`capacity` / `find_npu_capacity` 的信封 `kind` 为 `observed_availability`，其 `observed_at` 是所依赖的最旧快照时间；每个候选还带各自的 `observed_at`。`idle_npu_count`、`busy` 这类字段天然容易被当成"可分配"，请把它们理解为"上次观测到空闲/繁忙"，然后到协调器申请设备。HTTP 响应额外携带 `X-MindIE-Top-Contract: observation-only` 头，`/api/health` 返回 `contract: observation-only`。
+- `age_seconds: 4` 表示这是 4 秒前采集到的状态；
+- `allocation_authority: false` 提醒调用方：看到 `idle_npu_count: 4` 只代表“4 秒前看它有 4 张卡闲着”，不代表这 4 张卡已经给你留好了。选好候选机器后，请通过 `mindie-coordinator` 正式排队申请设备租约。
 
-## CLI
+---
+
+## 2. 终端 CLI 常用命令速查
 
 ```bash
+# 列出所有受监控的服务器概览
 npu-top servers
+
+# 查看某台机器每张 NPU 卡的忙闲、算力、显存和占用人（默认读缓存，秒回）
 npu-top npu 192.0.2.21
+
+# 强制采集器立刻去远端探测一次最新 NPU 状态
 npu-top npu 192.0.2.21 --live
+
+# 极简输出模式（适合塞进紧凑提示词）
 npu-top npu 192.0.2.21 --ultra-compact
+
+# 输出结构化 JSON，并附上占用进程的 PID 与工作目录详情
 npu-top --json npu 192.0.2.21 --processes
+npu-top --json npu 192.0.2.21 --process-details
+
+# 查看整机详细状态（NPU + CPU + 内存 + 磁盘 + Docker 容器，默认 live 实时探测）
 npu-top status 192.0.2.21
 npu-top status 192.0.2.21 --cache
+
+# 查看挂载盘容量，找地方存模型权重
 npu-top mounts 192.0.2.21 --live
+
+# 筛选最近 180 秒内观测到至少有 4 张空闲卡、且带有 A3 标签的候选服务器
 npu-top capacity --min-idle 4 --max-age 180 --tag A3
 ```
 
-默认输出只保留状态、缓存年龄、忙闲卡数、AICore、HBM、进程数和归属：
+默认文本输出专门针对人类阅读和模型 Token 消耗做过精简，只保留最核心的信息：
 
 ```text
 192.0.2.21 online age=4s npu=8 busy=2 util=24.5% hbm=96.0G/512.0G
@@ -45,15 +68,15 @@ npu-top capacity --min-idle 4 --max-age 180 --tag A3
 1 idle util=0% hbm=5.9G/64.0G proc=0 owner=-
 ```
 
-需要机器可读结果时使用 `--json`。`--processes` 加入精简进程记录；`--process-details` 进一步加入 pwd 和启动命令。`--max-age 180` 可约束缓存新鲜度，超限时保持输出并以退出码 `3` 标记陈旧。`status` 默认实时采样；使用 `status HOST --cache` 可直接读取缓存。实时请求由服务内采集队列执行，调用端不会直接 SSH。
+**实用小技巧**：
+- 想检查缓存是不是太老？加上 `--max-age 180`。如果快照已经超过 180 秒，命令依然会打印数据，但会以退出码 `3` 提醒你数据已陈旧。
+- 默认连接 `http://127.0.0.1:8788`，可通过 `--url` 或环境变量 `MINDIE_TOP_URL` 改成其他本地回环端口（为保护安全，默认拒绝非回环的外部网络地址）。
 
-`status` 汇总 NPU、CPU、内存、磁盘、Docker、占用进程/容器及可能的工号或姓名缩写；`mounts` 返回挂载源、文件系统、容量，并标出可能存放模型权重的挂载点；`capacity` 从新鲜缓存中筛选观测到满足空闲 NPU 数量和标签的机器，低优先级服务器排在最后。
+---
 
-默认 API 是 `http://127.0.0.1:8788`，可通过 `--url` 或 `MINDIE_TOP_URL` 修改为其他回环端口。为避免误将无认证接口暴露到网络，非回环 URL 默认拒绝。
+## 3. 给 AI 助手挂载 MCP 工具
 
-## MCP
-
-MCP server 使用标准输入输出传输，后端仍通过同一回环缓存 API 取数：
+在客户端配置文件（如 `.mcp.json`）中添加：
 
 ```json
 {
@@ -67,17 +90,23 @@ MCP server 使用标准输入输出传输，后端仍通过同一回环缓存 AP
 }
 ```
 
-服务提供五个只读工具，每个工具的描述都声明了 observation-only 契约：
+挂载后，AI 助手会获得 5 个只读工具：
 
-- `npu_status(host, mode?, include_processes?, process_details?, max_age_seconds?)`
-- `server_status(host, mode?, process_details?, timeout_seconds?)`
-- `list_mounts(host, mode?, timeout_seconds?)`
-- `find_npu_capacity(min_idle_npus?, max_age_seconds?, tags?, include_disabled?)`
-- `list_npu_servers()`
+| MCP 工具名 | 参数 | 适用场景 |
+| --- | --- | --- |
+| `list_npu_servers()` | 无 | 一眼看完当前监控了哪些服务器、各有多少张空卡 |
+| `find_npu_capacity(...)` | `min_idle_npus?`, `max_age_seconds?`, `tags?`, `include_disabled?` | 按所需空闲卡数和硬件标签（如 `A3`）快速挑出候选服务器（低优先级机器自动排最后） |
+| `npu_status(...)` | `host`, `mode?`, `include_processes?`, `process_details?`, `max_age_seconds?` | 查看指定服务器上每张卡的利用率、HBM 显存和是谁占着卡 |
+| `server_status(...)` | `host`, `mode?`, `process_details?`, `timeout_seconds?` | 查看指定服务器的 CPU、内存、磁盘、Docker 容器和占用人详情 |
+| `list_mounts(...)` | `host`, `mode?`, `timeout_seconds?` | 查看指定服务器的所有磁盘挂载点容量，并找出适合放模型权重的目录 |
 
-查询工具的文本结果与 CLI 一样精简，同时提供 `structuredContent`。`mode=cache` 适合快速初筛，`mode=live` 适合在向协调器申请设备之前做最后一次观测确认。MCP server 兼容当前无握手请求和常见的旧版 `initialize` 客户端；stdout 只写逐行 JSON-RPC 消息，诊断只写 stderr。
+> **推荐配合方式**：先用 `mode="cache"` 从内存里快速初筛出候选机器，选定目标后再用 `mode="live"` 做最后一次实时确认，然后交给 `mindie-coordinator` 申请用卡。
 
-## 只读 HTTP API
+---
+
+## 4. 本地只读 HTTP 接口一览
+
+如果你在写自己的本地脚本，也可以直接请求回环 HTTP 接口：
 
 ```text
 GET /api/agent/servers
@@ -87,6 +116,4 @@ GET /api/agent/server?host=192.0.2.21&mode=cache
 GET /api/agent/capacity?min_idle_npus=4&max_age_seconds=180&tags=A3
 ```
 
-`host` 精确匹配服务器 IP、显示名称、远端 hostname 或内部 id。响应中的 `source=cache` 表示数据最终来自采集器快照；`collected_at`/`age_seconds` 与 `observation.observed_at`/`observation.age_seconds` 含义相同，前者保留是为了兼容旧调用方。实时模式只是要求采集器先生成新快照，不会把 SSH 能力暴露给调用端。同一地址存在多个 SSH 端点时返回冲突错误，避免 Agent 猜测目标。
-
-文中的 `192.0.2.x` 为 RFC 5737 文档保留地址，仅作示例。
+其中 `host` 可以传服务器 IP、显示别名、远端 `hostname` 或内部 ID（如果同一个 IP 配了多个不同端口的 SSH 端点，接口会明确报错提示歧义，不会瞎猜）。*注：文档中的 `192.0.2.x` 为 RFC 5737 示例地址。*
