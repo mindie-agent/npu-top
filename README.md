@@ -60,7 +60,7 @@ flowchart LR
 帮我安装并配置 https://github.com/mindie-agent/npu-top
 ```
 
-<details open>
+<details>
 <summary>🤖 <b>AI Agent 自动安装与配置协议（Instructions for AI Agents）</b></summary>
 
 如果你是收到上述指令的 AI Agent，请按以下步骤为用户安装并接入 `npu-top`（优先使用官方 Release Wheel，已内置编译好的前端页面，无需用户本机安装 Node.js）：
