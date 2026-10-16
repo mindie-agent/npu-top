@@ -2,12 +2,12 @@
 
 **中文** · [English](./README.en.md) · [返回项目主页](../README.md)
 
-本目录包含 `npu-top` 的系统架构、只观测不分配契约、Agent CLI / MCP 接口以及昇腾设备解析规范。
+这里汇总了 `npu-top` 的内部采集原理、AI 编程助手查卡接口（CLI 与 MCP），以及昇腾各代芯片（含 Ascend 950 A5）的输出解析说明。
 
-## 文档列表
+## 文档导航
 
-| 文档 | 中文 | English | 内容概述 |
+| 文档主题 | 中文 | English | 你能在这里查到什么 |
 | --- | --- | --- | --- |
-| 系统架构与采集设计 | [architecture.zh.md](./architecture.zh.md) | [architecture.md](./architecture.md) | 宿主机接入与清单合并、Observation-only 契约、多级采样周期与 SQLite 持久化 |
-| Agent CLI 与 MCP 接口规范 | [agent-access.md](./agent-access.md) | [agent-access.en.md](./agent-access.en.md) | `observation` 信封格式、CLI 子命令、5 个只读 MCP 工具与回环 HTTP API |
-| Ascend 950 (A5) 探测解析规范 | [a5-probing.zh.md](./a5-probing.zh.md) | [a5-probing.md](./a5-probing.md) | Ascend 950 (A5) 四列 `npu-smi info` 表格解析与回归测试固件说明 |
+| 系统架构、多级采样与判忙规则 | [architecture.zh.md](./architecture.zh.md) | [architecture.md](./architecture.md) | 怎么通过 SSH 免安装采数据？怎么判断一张 NPU 卡到底忙不忙？为什么说它“只管看不管分”？ |
+| Agent CLI 与 MCP 查卡工具详解 | [agent-access.md](./agent-access.md) | [agent-access.en.md](./agent-access.en.md) | AI 助手怎么用 5 个 MCP 工具或 CLI 命令秒查空闲机器、看进程归属和找大盘挂载点？ |
+| Ascend 950 (A5) 探测与解析说明 | [a5-probing.zh.md](./a5-probing.zh.md) | [a5-probing.md](./a5-probing.md) | 新一代 Ascend 950 (A5) 的四列 `npu-smi info` 表格是怎么解析和做回归测试的？ |
