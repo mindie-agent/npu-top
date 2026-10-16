@@ -140,7 +140,6 @@ npu-top capacity --min-idle 4    # 筛选观测到至少有 4 张空闲 NPU 的�
 | 系统架构与采集设计 | [docs/architecture.zh.md](./docs/architecture.zh.md) | [docs/architecture.md](./docs/architecture.md) |
 | Agent CLI 与 MCP 接口规范 | [docs/agent-access.md](./docs/agent-access.md) | [docs/agent-access.en.md](./docs/agent-access.en.md) |
 | Ascend 950 (A5) 探测解析规范 | [docs/a5-probing.zh.md](./docs/a5-probing.zh.md) | [docs/a5-probing.md](./docs/a5-probing.md) |
-| 内置 Agent Skill 说明 | [.agents/skills/npu-top/SKILL.md](./.agents/skills/npu-top/SKILL.md) | [.agents/skills/npu-top/SKILL.md](./.agents/skills/npu-top/SKILL.md) |
 
 ---
 
