@@ -1,12 +1,9 @@
 """Optional, explicitly configured sources of hosts to monitor.
 
-None of these sources are discovered by walking the filesystem or by asking
-Git where the monitor is checked out. The operator (or the tool that deploys
-the monitor) passes concrete file paths and, optionally, one external command
-that can install the monitor's public key using a one-time password.
-
-The inventory describes *which hosts exist*. It says nothing about which
-devices may be used; that decision belongs to whatever coordinates the fleet.
+[Role] Loads host endpoints from explicit `MachineInventoryFile` / `HostPoolFile` paths and runs `ExternalKeyBootstrap`.
+[Invariants] Never walks parent checkouts or imports partial malformed files; exit `77` in `ExternalKeyBootstrap` means pre-write auth rejection, whereas other non-zero exits map to `unknown`.
+[Timeouts & Locks] `ExternalKeyBootstrap.run` honours `self.timeout`; passes password via `stdin` and redacts any echoed secret.
+[Side-Effect Policy] Reads local inventory files; executes operator-configured bootstrap command on demand.
 """
 
 from __future__ import annotations

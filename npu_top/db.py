@@ -1,3 +1,10 @@
+"""SQLite persistence for registered servers, bootstrap receipts, and 15-minute metric rollups.
+
+[Role] Owns `monitor.sqlite3` schema, server registry, idempotent SSH bootstrap receipts, and bounded history rollups.
+[Invariants] Configures WAL + `busy_timeout=5000` + `max_page_count` once per thread-local connection; never replays `sending`/`unknown`/`completed` bootstrap receipts.
+[Timeouts & Locks] Thread-local SQLite connections with `timeout=5.0`, `_write_lock` (`RLock`), and `_history_slots` (`BoundedSemaphore(2)`) with a `3s` progress-handler deadline.
+[Side-Effect Policy] Local SQLite writes and bounded history pruning only; zero network I/O.
+"""
 from __future__ import annotations
 
 import json
@@ -47,10 +54,6 @@ def rollup_schema(table: str, metrics: tuple[str, ...], device: bool = False) ->
 
 
 SCHEMA += rollup_schema("host_rollups", HOST_METRICS) + rollup_schema("device_rollups", DEVICE_METRICS, True)
-
-
-class AuthorityStateError(RuntimeError):
-    """Host registration/history authority cannot be read safely."""
 
 
 def bounded_history(method):
@@ -157,9 +160,6 @@ class Database:
                 (server["host"], server["port"], server["username"]),
             ).fetchone()
             return self._server(row)
-
-    def set_server_enabled(self, server_id: str, enabled: bool) -> bool:
-        return self.update_server(server_id, enabled=enabled)
 
     def update_server(
         self,

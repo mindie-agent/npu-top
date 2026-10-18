@@ -13,7 +13,6 @@ from pathlib import Path
 from npu_top.device_adapter import DeviceAdapter
 from npu_top.inventory import ExternalKeyBootstrap
 from npu_top.probe import (
-    attach_npu_telemetry,
     attach_process_details,
     build_process_detail_script,
     cpu_percent,
@@ -91,17 +90,13 @@ class ProbeTests(unittest.TestCase):
         ])
         self.assertEqual([mount["target"] for mount in parse_mounts(proc_mounts)], expected)
 
-    def test_docker_stats_and_npu_telemetry(self) -> None:
+    def test_docker_stats_parser(self) -> None:
         docker = parse_docker(
             '{"ID":"abc","Names":"worker","Image":"vllm","Status":"Up","State":"running"}',
             '{"Name":"worker","CPUPerc":"12.4%","MemUsage":"2GiB / 8GiB","PIDs":"10"}',
             '{"ServerVersion":"28.0","Driver":"overlay2","DockerRootDir":"/var/lib/docker"}',
         )
         self.assertEqual(docker["containers"][0]["stats"]["cpu_percent"], "12.4%")
-        devices = [{"npu_id": 0}]
-        attach_npu_telemetry(devices, "| 0 910B4 | OK 91.8 41 0 / 0 |")
-        self.assertEqual(devices[0]["temperature_c"], 41)
-        self.assertEqual(devices[0]["power_w"], 91.8)
 
     def test_busy_threshold_ignores_a3_driver_baseline(self) -> None:
         idle = {"processes": [], "aicore_percent": 0, "hbm": {"used_mb": 5989}}
@@ -193,25 +188,6 @@ class ProbeTests(unittest.TestCase):
             self.assertNotIn("ControlPersist", rendered)
             self.assertNotIn("ControlPath", rendered)
             self.assertIn("IdentitiesOnly=yes", rendered)
-
-    def test_windows_private_key_acl_is_scoped_to_current_user_once(self) -> None:
-        with tempfile.TemporaryDirectory() as state:
-            ssh = SshAccess(Path(state), PROJECT, is_windows=True)
-            ssh.private_key.parent.mkdir(parents=True)
-            ssh.private_key.write_text("private", encoding="utf-8")
-            ssh.public_key.write_text("public", encoding="utf-8")
-            responses = [
-                subprocess.CompletedProcess(["whoami"], 0, "DOMAIN\\monitor\n", ""),
-                subprocess.CompletedProcess(["icacls"], 0, "processed", ""),
-            ]
-            with mock.patch("npu_top.ssh_access.subprocess.run", side_effect=responses) as run:
-                ssh._secure_key_permissions()
-                ssh._secure_key_permissions()
-            self.assertEqual(run.call_count, 2)
-            self.assertEqual(
-                run.call_args_list[1].args[0],
-                ["icacls", str(ssh.private_key), "/inheritance:r", "/grant:r", "DOMAIN\\monitor:(R,W)"],
-            )
 
     def test_adapter_has_no_hosts_without_configured_sources(self) -> None:
         with tempfile.TemporaryDirectory() as state:

@@ -1,3 +1,10 @@
+"""Loopback HTTP client and compact text formatters for `npu-top` CLI and MCP.
+
+[Role] Queries `/api/agent/*` endpoints bypassing environment proxies (`ProxyHandler({})`) and formats compact human/agent summaries.
+[Invariants] Refuses non-loopback URLs unless `MINDIE_TOP_ALLOW_REMOTE=1` is set.
+[Timeouts & Locks] Default `3.0s` HTTP timeout for cached reads; expands to `timeout + 2s` (`>= inner_timeout + grace`) for `mode="live"`.
+[Side-Effect Policy] Loopback HTTP GET requests only.
+"""
 from __future__ import annotations
 
 import json

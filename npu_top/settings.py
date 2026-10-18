@@ -1,3 +1,10 @@
+"""Environment-driven configuration for `npu-top`.
+
+[Role] Parses and validates `NFM_*` environment variables into an immutable `Settings` dataclass.
+[Invariants] Rejects malformed or out-of-range explicit settings with `ValueError` instead of silently falling back to defaults.
+[Timeouts & Locks] Default `ssh_timeout=20s` exceeds inner `timeout 8` `npu-smi` commands; zero locks.
+[Side-Effect Policy] `prepare()` creates `state_dir`, `keys`, and `ssh-control` directories (`0o700`).
+"""
 from __future__ import annotations
 
 import os

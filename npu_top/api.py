@@ -1,3 +1,10 @@
+"""Loopback HTTP API and static console server for `npu-top`.
+
+[Role] Serves observation-only REST endpoints (`/api/health`, `/api/overview`, `/api/agent/*`, `/api/servers`, `/api/history`) and bundled web UI.
+[Invariants] Refuses non-loopback bind addresses; stamps `/api/*` responses with `X-MindIE-Top-Contract: observation-only`; distinguishes `completed`, `failed`, and `unknown` registration/bootstrap stages.
+[Timeouts & Locks] Delegates live collection waits (`timeout` up to `60s`) to `AdaptiveScheduler` and closes thread-local SQLite connections per request thread.
+[Side-Effect Policy] Loopback HTTP serving, SQLite server registry updates, and explicit SSH public-key bootstrap on `/api/servers/batch`.
+"""
 from __future__ import annotations
 
 import json
@@ -18,7 +25,7 @@ from .agent_view import (
     AgentQueryError, capacity_candidates, compact_server, find_server, npu_status, observation_envelope,
     server_status,
 )
-from .db import AuthorityStateError, Database
+from .db import Database
 from .device_adapter import DeviceAdapter
 from .scheduler import AdaptiveScheduler
 from .settings import Settings
@@ -217,7 +224,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         try:
             self._get()
-        except (sqlite3.Error, AuthorityStateError, OSError) as exc:
+        except (sqlite3.Error, OSError) as exc:
             code = getattr(exc, "sqlite_errorcode", 0)
             busy = code & 255 in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
             reference = capture_failure(exc, "storage_busy" if busy else "storage_failed")

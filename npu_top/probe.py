@@ -1,3 +1,10 @@
+"""SSH host probe and parser for NPU, CPU, memory, disk, mount, Docker, and `/proc` telemetry.
+
+[Role] Executes bounded remote shell probes over SSH and parses raw sections into structured host snapshots.
+[Invariants] Observation-only; `npu_info_rc` gates NPU health while optional `usages`/Docker/process-detail failures degrade gracefully without hiding NPU errors.
+[Timeouts & Locks] Remote `npu-smi` commands use inner `timeout 8`; outer SSH timeout is `max(ssh_timeout + 12, 32)` when infrastructure is included (`>= sum(inner_budgets) + grace`).
+[Side-Effect Policy] Read-only remote SSH probes (`/proc`, `df`, `findmnt`, `docker ps/stats/info`, `npu-smi info`); never mutates remote host state.
+"""
 from __future__ import annotations
 
 import base64
@@ -319,22 +326,6 @@ def attach_process_details(
         device["processes"] = enriched
 
 
-def attach_npu_telemetry(devices: list[dict[str, Any]], info: str) -> None:
-    details: dict[int, dict[str, float | str]] = {}
-    for line in info.splitlines():
-        match = re.search(
-            r"\|\s*(\d+)\s+([A-Za-z0-9_.-]+)\s+\|\s*([A-Za-z_.-]+)\s+(?:\|\s*)?(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)",
-            line,
-        )
-        if match and not match.group(2).isdigit():
-            details[int(match.group(1))] = {
-                "name": match.group(2), "health": match.group(3),
-                "power_w": float(match.group(4)), "temperature_c": float(match.group(5)),
-            }
-    for device in devices:
-        device.update(details.get(int(device["npu_id"]), {}))
-
-
 def is_device_busy(device: dict[str, Any], hbm_threshold_mb: int) -> bool:
     return (
         bool(device.get("processes"))
@@ -421,7 +412,6 @@ class HostProbe:
         memory = parse_meminfo(sections.get("meminfo", ""))
         npu = self.adapter.parse_npu(sections.get("npu_info", ""), sections.get("npu_usages", ""))
         devices = npu.get("devices", [])
-        attach_npu_telemetry(devices, sections.get("npu_info", ""))
         for device in devices:
             device["busy"] = is_device_busy(device, self.hbm_busy_threshold_mb)
 

@@ -1,3 +1,10 @@
+"""Stdio MCP server exposing `npu-top` observation tools (`npu_status`, `server_status`, `list_mounts`, `find_npu_capacity`, `list_npu_servers`).
+
+[Role] Translates JSON-RPC 2.0 MCP tool calls into loopback HTTP requests via `VawsTopClient`.
+[Invariants] All tools are read-only (`readOnlyHint=True`) and declare the observation-only contract.
+[Timeouts & Locks] Honours per-call `timeout_seconds` (`1..60s`) via `VawsTopClient`.
+[Side-Effect Policy] Read-only queries to local `npu-top` HTTP API and diagnostic event recording.
+"""
 from __future__ import annotations
 
 import json

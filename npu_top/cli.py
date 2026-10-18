@@ -1,3 +1,10 @@
+"""Command-line entry point for `npu-top` (`serve`, `mcp`, `diagnostics`, `servers`, `npu`, `status`, `mounts`, `capacity`).
+
+[Role] Parses CLI flags and dispatches to local HTTP server, stdio MCP server, diagnostics exporter, or `VawsTopClient`.
+[Invariants] Observation-only; exits `3` when `--max-age` is exceeded and `2` when the loopback monitor is unreachable.
+[Timeouts & Locks] Passes `--timeout` (`default 30s`) to `VawsTopClient` for live probes.
+[Side-Effect Policy] Loopback HTTP queries (or server launch on `serve`).
+"""
 from __future__ import annotations
 
 import argparse

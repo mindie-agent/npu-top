@@ -1,3 +1,10 @@
+"""Adaptive background collector and viewer-lease coordinator for `npu-top`.
+
+[Role] Polls enabled NPU hosts at `idle_interval` (or fastest active viewer lease in `1, 5, 10, 30s`) and coordinates on-demand live probes.
+[Invariants] Storage failures never erase completed in-memory probe snapshots or advance `_latest_persisted`; collector thread death is surfaced via `collector_status="failed"`.
+[Timeouts & Locks] `_condition` (`Condition`) synchronizes snapshots, viewer leases, and `collect_and_wait` (`1..60s` budget); worker pool bounded by `max_workers`.
+[Side-Effect Policy] Background SSH probes via `HostProbe` and rollup persistence/hourly pruning via `Database`.
+"""
 from __future__ import annotations
 
 import logging

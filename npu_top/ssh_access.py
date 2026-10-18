@@ -1,8 +1,9 @@
 """OpenSSH access for host probes: dedicated key, known_hosts, base command.
 
-This module knows nothing about where the monitor is deployed or which
-project manages the hosts. It only owns the monitor's private Ed25519 key,
-its isolated ``known_hosts`` file, and the OpenSSH options used for probes.
+[Role] Manages the monitor-owned Ed25519 keypair, isolated `known_hosts`, and OpenSSH command construction.
+[Invariants] Distinguishes `completed`, `not_started` (`authentication_rejected`), and `unknown` key-installation outcomes so uncertain remote writes are never replayed.
+[Timeouts & Locks] `ssh-keygen` bounded to `15s`, `ssh -G` preflight to `8s`, key auth check to `12s`, key install to `15s` (`ConnectTimeout=8`).
+[Side-Effect Policy] Local key generation under `state_dir/keys` and explicit `~/.ssh/authorized_keys` append during bootstrap.
 """
 
 from __future__ import annotations
@@ -105,20 +106,6 @@ class SshAccess:
         self.private_key.chmod(0o600)
         if self.public_key.exists():
             self.public_key.chmod(0o600)
-        if self.is_windows:
-            identity = subprocess.run(
-                ["whoami"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, timeout=5, check=False,
-            )
-            user = identity.stdout.strip()
-            if identity.returncode != 0 or not user:
-                raise RuntimeError("无法确定当前 Windows 用户，不能收紧监控私钥 ACL")
-            acl = subprocess.run(
-                ["icacls", str(self.private_key), "/inheritance:r", "/grant:r", f"{user}:(R,W)"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10, check=False,
-            )
-            if acl.returncode != 0:
-                raise RuntimeError((acl.stderr or acl.stdout or "icacls failed")[-1000:])
         self._key_permissions_ready = True
 
     def ssh_base(self, server: dict[str, Any], *, batch_mode: bool = True) -> list[str]:
@@ -180,9 +167,6 @@ class SshAccess:
         if "Permission denied" not in error or "unix_listener:" in error:
             return False, f"SSH 连接失败：{error or f'exit {result.returncode}'}"
         return False, None
-
-    def key_auth_works(self, server: dict[str, Any]) -> bool:
-        return self.check_key_auth(server)[0]
 
     def _default_identity_base(self, server: dict[str, Any]) -> list[str]:
         """ssh command that uses the invoking user's own default identities."""

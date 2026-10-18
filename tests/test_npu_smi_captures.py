@@ -4,7 +4,7 @@ import json
 import unittest
 from pathlib import Path
 
-from npu_top.probe import attach_npu_telemetry, is_device_busy
+from npu_top.probe import is_device_busy
 from npu_top import npu_smi
 
 
@@ -81,7 +81,6 @@ class CapturedNpuSmiTests(unittest.TestCase):
         info = (self.fixtures / 'a3-106.txt').read_text()
         parsed = adapter.parse_npu(info, (self.fixtures / 'a3-usages.txt').read_text())
         devices = parsed['devices']
-        attach_npu_telemetry(devices, info)
         self.assertEqual([d['npu_id'] for d in devices], list(range(8)))
         expected_hbm = [74451, 74368, 74347, 74369, 74368, 74367, 74350, 74365]
         self.assertEqual([d['hbm']['used_mb'] for d in devices], expected_hbm)

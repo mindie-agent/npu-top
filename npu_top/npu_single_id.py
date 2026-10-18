@@ -1,4 +1,10 @@
-"""Parser for the single-ID, four-column npu-smi device table (Ascend 950)."""
+"""Parser for the single-ID, four-column `npu-smi` device table (Ascend 950 / A5).
+
+[Role] Parses A5 four-column device rows and chipless process rows when `| NPU ID | Name | Health |` header is present.
+[Invariants] Returns `None` for non-A5 tables; raises `ValueError` on truncated or malformed A5 metric rows.
+[Timeouts & Locks] Pure string parsing; zero I/O or locks.
+[Side-Effect Policy] Side-effect free.
+"""
 from __future__ import annotations
 
 import re

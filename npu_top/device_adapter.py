@@ -1,15 +1,9 @@
 """Composition root for host access: SSH identity, NPU parsing, inventories.
 
-``DeviceAdapter`` replaces the former ``WorkspaceDeviceAdapter``, which located
-a sibling project by walking parent directories and Git common directories and
-then imported scripts from it. Everything the adapter needs is now injected:
-
-* ``SshAccess`` owns the monitor key and OpenSSH options;
-* ``npu_parser`` interprets ``npu-smi`` output (defaults to the bundled parser);
-* ``inventory_sources`` are explicit files that list hosts to monitor;
-* ``key_bootstrap`` is an optional external command for one-time passwords.
-
-The adapter observes hosts. It never decides which devices may be used.
+[Role] Composes `SshAccess`, `npu_smi.parse_npu`, explicit `InventorySource` files, and `ExternalKeyBootstrap`.
+[Invariants] Persists bootstrap receipts via `Database.reserve_bootstrap`/`finish_bootstrap` before and after remote key writes so uncertain writes are never repeated.
+[Timeouts & Locks] Delegates SSH timeouts to `SshAccess` and receipt locking to `Database._write_lock`.
+[Side-Effect Policy] Coordinates SSH key verification/installation and explicit inventory discovery; never allocates NPUs.
 """
 
 from __future__ import annotations
@@ -77,9 +71,6 @@ class DeviceAdapter:
 
     def preflight(self, server: dict[str, Any]) -> dict[str, Any]:
         return self.ssh.preflight(server)
-
-    def key_auth_works(self, server: dict[str, Any]) -> bool:
-        return self.ssh.key_auth_works(server)
 
     # ---- Credentials ----------------------------------------------------
     def bootstrap_with_passwords(self, server: dict[str, Any], passwords: list[str]) -> dict[str, Any]:

@@ -1,3 +1,10 @@
+"""Daemon startup, background inventory import, and graceful shutdown for `npu-top serve`.
+
+[Role] Wires `Settings`, `Database`, `DeviceAdapter`, `HostProbe`, `AdaptiveScheduler`, and `AppServer`.
+[Invariants] Resolves explicit inventory files before starting the server; surfaces background import or bootstrap failures in `app.inventory_state` and `/api/health`.
+[Timeouts & Locks] Graceful `SIGTERM`/`KeyboardInterrupt` shutdown stops `AdaptiveScheduler` (`5s` join) and closes `AppServer` and `Database`.
+[Side-Effect Policy] Binds loopback HTTP port, initializes SQLite DB, ensures SSH keypair, and runs background inventory bootstrap/collection.
+"""
 from __future__ import annotations
 
 import signal
