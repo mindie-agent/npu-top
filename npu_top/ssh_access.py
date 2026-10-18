@@ -67,9 +67,24 @@ class SshAccess:
         if self.private_key.exists() and self.public_key.exists():
             self._secure_key_permissions()
             return self.private_key
-        if self.private_key.exists() or self.public_key.exists():
-            raise RuntimeError("监控 SSH 密钥对不完整；保留现有密钥，请核对后恢复配对文件")
         self.private_key.parent.mkdir(parents=True, exist_ok=True)
+        if self.private_key.exists() and not self.public_key.exists():
+            derived = subprocess.run(
+                ["ssh-keygen", "-y", "-f", str(self.private_key)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            if derived.returncode == 0 and derived.stdout.strip():
+                self.public_key.write_text(derived.stdout, encoding="utf-8")
+                self._secure_key_permissions()
+                return self.private_key
+            self.private_key.unlink(missing_ok=True)
+        if self.public_key.exists() or self.public_key.is_symlink():
+            self.public_key.unlink(missing_ok=True)
         result = subprocess.run(
             ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "npu-fleet-monitor", "-f", str(self.private_key)],
             stdin=subprocess.DEVNULL,
@@ -204,9 +219,11 @@ class SshAccess:
         try:
             install = subprocess.run(
                 [*self._default_identity_base(server), "sh", "-c", shlex.quote(remote)], stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=15, check=False,
                 cwd=self.working_dir,
             )
+        except subprocess.TimeoutExpired:
+            return KeyInstallResult("unknown", "密钥安装超时；远端授权文件写入结果不确定，请先核对")
         except OSError as exc:
             return KeyInstallResult("not_started", f"无法启动密钥安装：{type(exc).__name__}")
         if install.returncode == 0:
