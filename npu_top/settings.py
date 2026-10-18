@@ -64,7 +64,7 @@ class Settings:
             infrastructure_interval=_number("NFM_INFRA_INTERVAL_SECONDS", 60, 15),
             retention_days=_number("NFM_RETENTION_DAYS", 90, 1),
             max_workers=_number("NFM_MAX_WORKERS", 8, 1),
-            ssh_timeout=_number("NFM_SSH_TIMEOUT_SECONDS", 12, 2),
+            ssh_timeout=_number("NFM_SSH_TIMEOUT_SECONDS", 20, 2),
             sqlite_max_mb=_number("NFM_SQLITE_MAX_MB", 1024, 16),
             hbm_busy_threshold_mb=_number("NFM_HBM_BUSY_THRESHOLD_MB", 8192, 1),
             inventory_files=_paths("NFM_INVENTORY_FILES"),

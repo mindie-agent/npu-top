@@ -317,6 +317,30 @@ class ProbeTests(unittest.TestCase):
             self.assertEqual(run.call_args.kwargs["input"], "one-time\n")
             self.assertNotIn("one-time", " ".join(argv))
 
+    def test_default_ssh_timeout_exceeds_inner_probe_budget(self) -> None:
+        from npu_top.probe import HostProbe
+
+        with mock.patch.dict("os.environ", {}, clear=True):
+            settings = Settings.load()
+        self.assertEqual(settings.ssh_timeout, 20)
+
+        adapter = mock.MagicMock()
+        adapter.preflight.return_value = {"ok": True}
+        adapter.parse_npu.return_value = {"devices": [], "process_records": []}
+        probe = HostProbe(adapter, timeout=settings.ssh_timeout)
+        observed_timeouts: list[int] = []
+
+        def fake_run_script(_server, _script, timeout):
+            observed_timeouts.append(timeout)
+            return subprocess.CompletedProcess(
+                [], 0, "__NFM_SECTION__proc_stat\ncpu  100 0 50 850 0 0 0 0\n__NFM_SECTION__npu_info_rc\n0\n", ""
+            )
+
+        with mock.patch.object(probe, "_run_script", side_effect=fake_run_script):
+            probe.collect({"id": "s1", "name": "s1", "host": "10.0.0.1"}, include_infrastructure=False)
+            probe.collect({"id": "s1", "name": "s1", "host": "10.0.0.1"}, include_infrastructure=True)
+        self.assertEqual(observed_timeouts, [20, 32])
+
 
 if __name__ == "__main__":
     unittest.main()

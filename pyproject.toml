@@ -27,3 +27,13 @@ packages = ["npu_top"]
 
 [tool.hatch.build.hooks.custom]
 path = "hatch_build.py"
+
+[tool.pytest.ini_options]
+pythonpath = [".", "tests"]
+addopts = "-m 'not live_npu'"
+markers = [
+    "unit: pure in-memory unit and contract tests",
+    "integration: local HTTP/SQLite/process integration tests",
+    "live_npu: real SSH tests against live Ascend A2/A3 nodes",
+]
+

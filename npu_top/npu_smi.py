@@ -137,8 +137,12 @@ def parse_npu_smi_info(text: str) -> dict[str, Any]:
             metrics = _HEADER_METRICS.match(" ".join(cells[1:]))
             if metrics:
                 current["health"] = metrics.group("health")
-                current["power_w"] = _number(metrics.group("power"))
-                current["temperature_c"] = _number(metrics.group("temp"))
+                power = _number(metrics.group("power"))
+                if power is not None:
+                    current["power_w"] = power
+                temp = _number(metrics.group("temp"))
+                if temp is not None:
+                    current["temperature_c"] = temp
             continue
 
         if _INT_CELL.match(first) and len(cells) >= 2 and current is not None:

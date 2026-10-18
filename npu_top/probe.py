@@ -399,8 +399,9 @@ class HostProbe:
         # driver/runtime versions. Their non-zero status must not replace the
         # explicit npu_info_rc health gate above.
         script = FAST_SCRIPT + (INFRA_SCRIPT if include_infrastructure else "") + "\nexit 0\n"
+        effective_timeout = max(self.timeout + 12, 32) if include_infrastructure else self.timeout
         try:
-            result = self._run_script(server, script, self.timeout + (12 if include_infrastructure else 0))
+            result = self._run_script(server, script, effective_timeout)
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"SSH 探查超时（{exc.timeout:g}s）") from exc
         if result.returncode != 0:

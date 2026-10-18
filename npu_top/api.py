@@ -495,7 +495,11 @@ class AppServer(ThreadingHTTPServer):
         finally:
             self.app.db.close()
 
+    def serve_forever(self, poll_interval: float = 0.01) -> None:
+        super().serve_forever(poll_interval=poll_interval)
+
     def __init__(self, address: tuple[str, int], app: App) -> None:
         host, port = address
         super().__init__((require_loopback_bind(host), port), Handler)
         self.app = app
+
