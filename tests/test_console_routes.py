@@ -96,6 +96,8 @@ def console(*, web_root: Path | None = None, seed_server: bool = True):
             (static / "index.html").write_text("<!doctype html><title>npu-top</title>", encoding="utf-8")
             app.web_root = static
         server = AppServer(("127.0.0.1", 0), app)
+        # Drain request-local SQLite handles before deleting the Windows fixture.
+        server.daemon_threads = False
         thread = threading.Thread(target=server.serve_forever, name="npu-top-test", daemon=True)
         thread.start()
         try:
