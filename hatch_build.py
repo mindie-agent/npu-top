@@ -19,4 +19,5 @@ class CustomBuildHook(BuildHookInterface):
                 raise RuntimeError("npu-top wheel requires frontend assets; install npm or build static assets first")
             subprocess.check_call([npm, "ci", "--no-audit", "--no-fund"], cwd=root)
             subprocess.check_call([npm, "run", "build"], cwd=root)
-        build_data["force_include"][str(static)] = "npu_top/static"
+        # Assets may already be present in an sdist; include each path once.
+        build_data["artifacts"].append("npu_top/static/**")
