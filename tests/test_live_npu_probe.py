@@ -76,17 +76,19 @@ def test_live_a3_192_168_13_165_idle_probe(tmp_path: Path) -> None:
 
 
 @pytest.mark.live_npu
-def test_live_a3_192_168_13_154_busy_probe(tmp_path: Path) -> None:
+def test_live_a3_192_168_13_154_probe(tmp_path: Path) -> None:
     probe = HostProbe(LiveDefaultSshAdapter(tmp_path), timeout=8)
     server = {"id": "a3-154", "name": "a3-192-168-13-154", "host": "192.168.13.154", "port": 22, "username": "root", "enabled": True, "tags": ["a3"]}
     snapshot = probe.collect(server, include_infrastructure=True)
     assert snapshot["summary"]["npu_count"] == 8
     assert snapshot["summary"]["hbm_total_mb"] == 8 * 131072
-    assert snapshot["summary"]["busy_npu_count"] >= 1
     for idx, dev in enumerate(snapshot["devices"]):
         assert dev["npu_id"] == idx
         assert dev["name"] == "Ascend910"
         assert [c["phy_id"] for c in dev["chips"]] == [2 * idx, 2 * idx + 1]
-    all_procs = [proc for dev in snapshot["devices"] for proc in dev.get("processes", [])]
-    assert len(all_procs) >= 1
-    assert all(proc.get("phy_id") in range(16) for proc in all_procs if "chip_id" in proc)
+        for proc in dev.get("processes", []):
+            if "chip_id" in proc:
+                assert proc["phy_id"] == 2 * idx + proc["chip_id"]
+    # Standing hosts may be idle; validate the observed projection, not a workload.
+    status_view = npu_status(server, snapshot, include_processes=True, detailed_processes=True)
+    assert status_view["summary"]["busy_npu_count"] == sum(bool(dev["busy"]) for dev in snapshot["devices"])
