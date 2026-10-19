@@ -1,183 +1,250 @@
-# npu-top · MindIE Agent
+<h1 align="center">MindIE Agent NPU Top (<code>npu-top</code>)</h1>
 
-Part of [MindIE Agent](https://github.com/mindie-agent/mindie-agent).
+<p align="center">
+  <strong>轻量级昇腾 NPU 多机监控面板——一条命令在本地拉起 Web 实时看板与 90 天热力图，通过 SSH 免装插件看清每张 NPU 卡的算力、显存与占用人，还能直接给 AI Agent 提供查卡工具</strong>
+</p>
 
-面向本机单用户的 Ascend NPU 监控台。它通过宿主机 SSH 无代理采集，重点展示 NPU 利用率、HBM、CPU、系统内存、磁盘、挂载点和 Docker 容器，并以 SQLite 保存历史数据。用 `uvx` 在本机拉起，只服务自己，不对外提供托管服务。
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/Interface-Web%20UI%20%7C%20CLI%20%7C%20MCP-00ADD8" alt="Web UI, CLI & MCP">
+  <img src="https://img.shields.io/badge/Ascend-910B%20%7C%20A3%20(910C)%20%7C%20A5%20(950)-FF6F00" alt="Ascend NPU">
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT"></a>
+</p>
 
-**npu-top 只观测，不分配。** 它不是设备分配权威：哪些 NPU 可以被使用，由宿主机侧的 NPU 协调器队列决定。npu-top 的所有 Agent 接口都把数据标注为"带观测时间戳的观测状态"，并明确声明不得据此做设备分配决策。详见 [docs/agent-access.md](docs/agent-access.md) 与 [docs/architecture.md](docs/architecture.md)。
+<p align="center">
+  <strong>中文</strong> · <a href="./README.en.md">English</a> · <a href="#快速开始">快速开始</a> · <a href="#真实使用场景">使用场景</a> · <a href="#配置参数一览">配置说明</a> · <a href="./docs/README.md">文档中心</a> · <a href="https://github.com/mindie-agent/mindie-agent">MindIE Agent 主仓库</a>
+</p>
 
-## 诊断与故障状态
+---
 
-CLI、MCP、HTTP、后台采集及 inventory 初始化使用零依赖的 `mindie-diagnostics`。
-该依赖固定为公开 canonical Git revision，独立 wheel/uvx 安装无需先准备 consumer
-或 knowledge；共享包的 release wheel 可用于离线依赖包。
-`MINDIE_LOG_LEVEL` 控制 DEBUG/INFO/WARNING/ERROR，`MINDIE_DIAGNOSTICS_ROOT` 可覆盖平台
-用户状态目录。不同进程独立写 JSONL，每段 1 MiB、保留三个轮转备份；可选诊断 worker
-按全局容量与时间保留清理旧进程日志。日志写失败保留原业务结果。
+## 为什么需要 `npu-top`？
 
-采集线程失败后 `/api/health` 返回 503 和 `degraded`，runtime 包含实际线程存活状态
-和异常类型；等待新采样的调用立即得到不可用，不伪造成功。失败 probe 的耗时来自
-实际工作线程内的计时，不再写零或把排队时间当作探测时间。不会自动重放 bootstrap。
+当团队手头有好几台甚至几十台昇腾（Ascend）NPU 服务器时，大家每天都在问同一个问题：**“现在哪台机器有 4 张空闲的卡？0 号卡上那个占了 40G 显存的进程到底是谁跑的？哪个挂载盘空间够放模型权重？”**
 
-明确配置的 inventory 缺失、损坏或含无效记录会阻止初始化，不能当作空清单或只导入
-其中一部分。后台导入失败同时出现在 health、普通列表和总览的 runtime，带本地诊断引用。
-已有 SQLite 主库缺失或结构损坏会保留现存文件并报错，不自动重建为空库。进程详情
-刷新失败保留有效 NPU 观测，但清除本次未确认的旧详情并返回不可用原因；详情时间单独标注。
+`npu-top` 是运行在你个人电脑或开发机上的**零侵入昇腾监控台**。不需要往远端服务器上安装任何常驻监控 Agent，它直接通过宿主机 SSH 执行只读命令，帮你和你的 AI 编程助手随时看清全局状态：
 
-`npu-top diagnostics bundle --root PATH --output support.json` 仅离线导出严格字段
-投影与脱敏结果，不扫描宿主机、不启动服务、不上传原始 inventory、密码或命令。
-自动 issue 上报由独立启用的 reporter 负责；普通监控请求不等待网络上报。
+- **免装远端插件，通吃主流昇腾卡型**：直接在物理宿主机上运行 `npu-smi` 跨容器透视设备占用，内置解析器完整适配 **单 Die（910B 类）**、**双 Die（A3 / 910C 类）** 和 **Ascend 950（A5）**。
+- **平时省资源，看面板时秒级刷新**：你在浏览器打开看板时支持 1s / 5s / 10s / 30s 实时刷新；关掉网页后自动降频到 120s 后台巡检，绝不给服务器添乱。
+- **90 天历史趋势与热力图，磁盘占用有上限**：自动保存 15 分钟粒度的历史数据，展示 CPU、内存、NPU、HBM 和逐卡 AICore 热力图；同时把 SQLite 数据库严格限制在 `1024 MB` 以内（可通过 `NFM_SQLITE_MAX_MB` 调整），满了自动清理最老的数据，绝不撑爆你的本地硬盘。
+- **密码只过内存、绝不落盘**：批量添加机器时，密码只用于当次在内存里自动安装专用 Ed25519 公钥，绝不写进数据库、配置文件或日志。
+- **给 AI 助手配好现成的查卡工具（CLI + MCP）**：内置 5 个只读 MCP 工具和同名 CLI 命令。AI 助手不用自己拼 SSH 命令、更不用碰你的服务器密码，就能秒查哪台机器有空卡、哪个盘能放权重。
 
-## 安装与启动
+> [!IMPORTANT]
+> **核心约定：`npu-top` 只负责“看路况”，不负责“抢车位”（`allocation_authority: false`）**
+> `npu-top` 展示的是服务器在最近一次采样时的快照（比如“4 秒前看到有 4 张空闲卡”），但它**不会替你锁卡**。真正跑任务要申请和占用 NPU 时，请交给宿主机侧的调度队列 [`mindie-coordinator`](https://github.com/mindie-agent/coordinator) 统一排队分配。
 
-唯一版本号来自 `pyproject.toml` 的 `0.1.6`。MCP `serverInfo.version` 读取 `importlib.metadata.version("npu-top")`；`package.json` 的 version 与之相同。
+```mermaid
+flowchart LR
+    User["👀 开发者浏览器 & 🤖 AI 编程助手"]
+    Server["⚡ npu-top serve (127.0.0.1:8788)<br/>内存实时缓存 + 有界 SQLite 历史库"]
+    MCP["🔌 npu-top CLI / MCP<br/>(5 个只读查卡工具)"]
+    SSH["🔑 专用 Ed25519 密钥 + SSH 连接复用"]
+    Hosts["🖥️ 多台昇腾 NPU 裸机服务器<br/>(910B / A3 910C / A5 950)"]
 
-### 推荐：GitHub Release wheel（无需本机 Node）
-
-Release 资产里的 wheel 已打入前端构建产物。私有仓库下载需要已登录的 `gh` 或 `GITHUB_TOKEN`。
-
-```bash
-gh release download v0.1.6 -R mindie-agent/npu-top -p '*.whl'
-uvx --from ./npu_top-0.1.6-py3-none-any.whl npu-top serve
+    User -->|"打开看板 / 查热力图"| Server
+    User -->|"调用查卡工具"| MCP
+    MCP -->|"读取本地回环 API"| Server
+    Server -->|"自适应多级采样"| SSH
+    SSH -->|"免安装只读探测 npu-smi"| Hosts
 ```
 
-或在已具备仓库读权限的环境里直接指向资产 URL：
+---
+
+## 快速开始
+
+### 方式一：直接把链接发给你的 Agent 自动安装/接入（推荐）
+
+复制下面这句话发给你的 Claude Code、Codex、Kimi Code 或 Cursor，让它帮你把监控后台和 MCP 查卡工具一次配好：
+
+```text
+帮我安装并配置 https://github.com/mindie-agent/npu-top
+```
+
+<details>
+<summary>🤖 <b>AI Agent 自动安装与配置协议（Instructions for AI Agents）</b></summary>
+
+如果你是收到上述指令的 AI Agent，请按以下步骤为用户安装并接入 `npu-top`（优先使用官方 Release Wheel，已内置编译好的前端页面，无需用户本机安装 Node.js）：
+
+1. **检查基础依赖**：确认本机有 Python `>= 3.11`、`uv` 以及系统的 `ssh` / `ssh-keygen`。
+2. **后台启动本地 `npu-top serve` 监控服务**（默认监听本地回环 `http://127.0.0.1:8788`）：
+   ```bash
+   uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.1.6/npu_top-0.1.6-py3-none-any.whl" npu-top serve
+   ```
+3. **在当前宿主客户端注册 `npu-top` MCP Server**：
+   - **Claude Code**（写入 `.mcp.json` 或直接运行命令）：
+     ```bash
+     claude mcp add npu-top -e MINDIE_TOP_URL=http://127.0.0.1:8788 -- uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.1.6/npu_top-0.1.6-py3-none-any.whl" npu-top mcp
+     ```
+   - **Cursor**（写入 `.cursor/mcp.json`）或通用 `.mcp.json`：
+     ```json
+     {
+       "mcpServers": {
+         "npu-top": {
+           "command": "uvx",
+           "args": [
+             "--from",
+             "https://github.com/mindie-agent/npu-top/releases/download/v0.1.6/npu_top-0.1.6-py3-none-any.whl",
+             "npu-top",
+             "mcp"
+           ],
+           "env": {
+             "MINDIE_TOP_URL": "http://127.0.0.1:8788"
+           }
+         }
+       }
+     }
+     ```
+   - **Kimi Code**（写入 `.kimi-code/mcp.json`）：
+     ```json
+     {
+       "mcpServers": {
+         "npu-top": {
+           "command": "uvx",
+           "args": [
+             "--from",
+             "https://github.com/mindie-agent/npu-top/releases/download/v0.1.6/npu_top-0.1.6-py3-none-any.whl",
+             "npu-top",
+             "mcp"
+           ],
+           "env": {
+             "MINDIE_TOP_URL": "http://127.0.0.1:8788"
+           }
+         }
+       }
+     }
+     ```
+   - **OpenAI Codex**（追加到 `.codex/config.toml`）：
+     ```toml
+     [mcp_servers.npu_top]
+     command = "uvx"
+     args = ["--from", "https://github.com/mindie-agent/npu-top/releases/download/v0.1.6/npu_top-0.1.6-py3-none-any.whl", "npu-top", "mcp"]
+     env = { MINDIE_TOP_URL = "http://127.0.0.1:8788" }
+     ```
+4. **验证连通性**：运行 `curl -sf http://127.0.0.1:8788/api/health` 确认返回 `"status": "ok"`，并告知用户可在浏览器打开 `http://127.0.0.1:8788` 查看实时看板或添加服务器。
+
+</details>
+
+### 方式二：终端手动一行启动（适合人类开发者）
+
+**推荐做法（直接用打包好前端的 Release Wheel，无需安装 Node.js）：**
 
 ```bash
 uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.1.6/npu_top-0.1.6-py3-none-any.whl" npu-top serve
 ```
 
-浏览器访问 `http://127.0.0.1:8788`。`npu-top serve` 单进程同时提供 HTTP API 与静态前端，默认只绑 loopback。`python -m npu_top` 与 `npu-top` 等价。
+启动后直接用浏览器打开 `http://127.0.0.1:8788` 即可看到 Web 监控台！
 
-### 开发者路径：从 git 构建（需要 Node.js 22.13+）
-
-`uvx --from git+…` 会在本机执行 hatch 构建。构建 hook 校验前端输入指纹、产物文件哈希及入口引用；只有与当前源码匹配的完整产物才会复用。缺失、陈旧或损坏的产物触发 `npm ci && npm run build`；缺少 npm 或必要静态文件时，wheel 构建明确失败。
+**从 Git 源码构建启动（需要本机装有 Node.js `>= 22.13` 用于编译前端）：**
 
 ```bash
+# 直接通过 uvx 从 Git 拉取构建并启动
 uvx --from git+https://github.com/mindie-agent/npu-top@main npu-top serve
-```
 
-源码树里也可以显式串起两步：
-
-```bash
+# 或者克隆源码到本地构建 Wheel
 git clone https://github.com/mindie-agent/npu-top.git
 cd npu-top
 ./scripts/build_wheel.sh
 ```
 
-### MCP
+---
 
-`.mcp.json`：
+## 真实使用场景
 
-```json
-{
-  "mcpServers": {
-    "npu-top": {
-      "command": "uvx",
-      "args": [
-        "--from",
-        "https://github.com/mindie-agent/npu-top/releases/download/v0.1.6/npu_top-0.1.6-py3-none-any.whl",
-        "npu-top",
-        "mcp"
-      ],
-      "env": {
-        "MINDIE_TOP_URL": "http://127.0.0.1:8788"
-      }
-    }
-  }
-}
-```
+### 场景 1：跑大模型前，一行命令找出哪台机器有至少 4 张空闲 NPU 卡
 
-开发者可用 `git+https://github.com/mindie-agent/npu-top@<ref>` 替换 `--from` 的 wheel URL。五个工具见 [docs/agent-access.md](docs/agent-access.md)。
-
-## 主要能力
-
-- 批量添加服务器；先尝试项目专用密钥，再按顺序尝试本次请求中的密码候选。
-- 可选地从显式配置的清单文件导入主机（`NFM_INVENTORY_FILES`、`NFM_HOST_POOL_FILES`）；只读取每条记录的主机端点字段。仅出现在主机池、未进入活动清单的设备自动获得"低优先级"标签。
-- 密码只通过请求内存和标准输入传给可选的外部密钥引导命令（`NFM_BOOTSTRAP_COMMAND`），不写数据库、文件、命令参数或应用日志。
-- 成功认证后自动安装专用 Ed25519 公钥；后续采集使用密钥和复用的 OpenSSH 控制连接。
-- Host Key 使用独立 `known_hosts`，首次连接记录指纹，指纹变化时 OpenSSH 会拒绝连接。
-- 在裸机宿主机运行 `npu-smi`，可跨容器观察占用；内置并经单元测试的解析器覆盖单 die（910B 类）与双 die（A3/910C 类）设备表、两种进程表布局和 `-t usages` 输出。
-- 判忙优先进程与 AICore 利用率，HBM 作为兜底；默认 8 GB 阈值避开 A3 类设备约 6 GB 的驱动常驻占用，可通过 `NFM_HBM_BUSY_THRESHOLD_MB` 调整。
-- 页面可选 1、5、10、30 秒实时刷新；多个页面同时打开时采用最快频率。
-- 页面关闭或心跳过期后自动回到默认 120 秒巡检；磁盘、挂载和 Docker 默认 60 秒一次。
-- 交互态高频结果保留在内存，SQLite 默认最短每 30 秒落一条，避免历史库随 1 秒刷新膨胀。
-- 固定服务器侧栏汇总在线状态、NPU 数量、HBM 和 CPU；总览展开物理 die 展示逐 die HBM 占用（A3 为 8 张逻辑卡、16 个 die），AICore 非零时以右上角红色闪光点提示。点击服务器可按逻辑卡分组查看两个 die，以及逐卡 AICore/HBM、温度、功耗、进程、磁盘与 Docker 明细。
-- 服务器标签可在管理页新增、编辑并通过侧栏搜索；派生的"低优先级"标签在后续同步中自动维护，低优先级服务器排在普通服务器之后。
-- 历史报表覆盖 1 小时到 90 天，包含聚合趋势，以及按日期和 2 小时时段排列的 CPU、内存、NPU、HBM 与逐卡 AICore 热力图；原始数据默认保留 90 天。
-- 默认只监听 `127.0.0.1`，不含登录功能，也不应直接暴露到外网。
-- 为 Agent 提供统一 CLI/MCP：可按 IP/主机名选择缓存或实时探查，筛选观测到的空闲算力，并查询 NPU、CPU、内存、容器/进程归属及挂载盘；SSH 始终封装在常驻采集器内。结构化 JSON、`observation` 信封和完整参数见 [Agent CLI 与 MCP](docs/agent-access.md)。
-- Agent 的完整使用和观测边界见 [Agent CLI 与 MCP](docs/agent-access.md)。
-
-## 依赖与目录
-
-运行时需要 Python 3.11+、系统 OpenSSH 客户端和 `ssh-keygen`。后端只使用 Python 标准库，不依赖 `torch`/`torch_npu`。构建 wheel 或从 git 安装时才需要 Node.js 22.13+。
-
-```text
-npu_top/       Python 包：HTTP API、采集调度、npu-smi 解析、SSH、CLI、MCP
-npu_top/static/  前端构建产物（gitignore，由 npm run build 写入 wheel）
-app/            前端源码（Vite 静态 SPA）
-tests/          标准库 unittest，针对安装后的 npu_top 包
-scripts/        build_wheel.sh：uv build（构建 hook 验证或生成前端产物）
-docs/           架构与 Agent 接口
-.agents/skills/ 随仓库分发的 Agent Skill
-```
-
-运行时私有状态默认写在当前工作目录的 `data/`：SQLite、专用密钥、`known_hosts` 和 SSH 控制套接字。用 `NFM_STATE_DIR` 改位置。该目录已忽略，不会进入 Git。
-
-## 配置
-
-所有外部输入都通过环境变量显式给出，模板见 [`.env.example`](.env.example)。
-
-| 变量 | 作用 |
-|------|------|
-| `NFM_INVENTORY_FILES` | JSON 主机清单（`{"machines": [{"alias", "host": {"ip", "port", "user", "machine_type"}}]}`），多个路径用平台路径分隔符连接；其中的主机作为活动主机导入 |
-| `NFM_HOST_POOL_FILES` | 纯文本主机池，每行取第一个字段；仅出现在这里的主机带"低优先级"标签 |
-| `NFM_BOOTSTRAP_COMMAND` | 可选外部命令模板，用一次性密码安装监控公钥；占位符 `{host} {port} {user} {public_key_file} {python}`，密码经 stdin 传入。未配置时只支持已有密钥登录 |
-| `NFM_STATE_DIR` | 私有状态目录，默认当前目录下的 `data/` |
-| 其余 `NFM_*` | 监听地址/端口、采集周期、保留天数、HBM 判忙阈值 |
-
-自动导入只读取清单中的宿主机地址、端口、用户和机器类型；不会采用容器端口，也不会创建或修改容器。已有数据库记录优先，不会在每次启动时重命名用户维护的服务器。
-
-## CLI
+不用挨台机器 `ssh` 上去敲 `npu-smi info`，直接从本地缓存秒筛候选服务器（低优先级机器会自动排在最后）：
 
 ```bash
-npu-top serve
-npu-top serve --port 9876
-npu-top mcp
+# 找出最近 3 分钟内观测到至少有 4 张空闲卡的 A3 机器
+npu-top capacity --min-idle 4 --max-age 180 --tag A3
+```
+
+### 场景 2：查看某台服务器上每张卡的算力、显存和占用人
+
+```bash
+# 秒读内存缓存，看每张卡谁在用
 npu-top npu 192.0.2.21
-npu-top servers
-npu-top status 192.0.2.21
-npu-top mounts 192.0.2.21
-npu-top capacity --min-idle 4
+
+# 输出示例：
+# 192.0.2.21 online age=4s npu=8 busy=2 util=24.5% hbm=96.0G/512.0G
+# 0 busy util=91% hbm=41.2G/64.0G proc=1 owner=x01234567,xyz
+# 1 idle util=0% hbm=5.9G/64.0G proc=0 owner=-
+
+# 准备提交任务前，加上 --live 让采集器立刻去远端刷一次最新状态
+npu-top npu 192.0.2.21 --live
+
+# 想看占用进程的完整启动命令和工作目录？加上 --json 和 --process-details
+npu-top --json npu 192.0.2.21 --process-details
 ```
 
-开发时分别跑前端热更新（Vite 把 `/api` 代理到本机 `npu-top serve`）：
+### 场景 3：查看服务器上哪个挂载盘空间够放几百 GB 的模型权重
 
 ```bash
-npu-top serve --port 8788
-npm ci
-npm run dev
+# 查看主机全貌（NPU、CPU、内存、磁盘、Docker 容器）
+npu-top status 192.0.2.21
+
+# 查看所有挂载点容量（自动高亮可能存放模型权重的共享大盘）
+npu-top mounts 192.0.2.21 --live
 ```
 
-## 批量格式
+---
 
-界面中每行一台服务器：
+## 错误与数据保留
+
+显式配置的 inventory 缺失、损坏或含无效记录会阻止初始化；后台导入失败保留诊断，不能当作空清单。已有数据库损坏时保留文件并报错。进程详情刷新失败保留有效 NPU 观测，但不会把旧详情标为本次确认。
+
+SSH 公钥安装区分尚未开始、已完成与结果不确定；断连后的未知写入需要先核对远端结果，重复添加机器不会自动重发。密码不写入回执。
+
+## 配置参数一览
+
+所有配置都通过环境变量传入（完整示例见 [`.env.example`](./.env.example)）：
+
+| 环境变量 | 默认值 | 它用来干什么 |
+| --- | --- | --- |
+| `NFM_STATE_DIR` | `./data` | 本地存放 SQLite 数据库、专用 SSH 密钥、`known_hosts` 和连接套接字的目录 |
+| `NFM_INVENTORY_FILES` | 未设置 | 启动时自动导入的 JSON 机器清单路径（多个文件用系统路径分隔符隔开） |
+| `NFM_HOST_POOL_FILES` | 未设置 | 纯文本主机池文件路径（每行取第 1 列地址）；只出现在这里的机器会自动打上 `低优先级` 标签 |
+| `NFM_BOOTSTRAP_COMMAND` | 未设置 | 可选的首次免密引导命令模板（密码通过内存 `stdin` 传入以安装公钥，绝不落盘） |
+| `NFM_HBM_BUSY_THRESHOLD_MB` | `8192` | HBM 显存判忙阈值（默认 8192 MB，专门避开 A3 机器空载时约 6 GB 的驱动常驻显存） |
+| `NFM_SQLITE_MAX_MB` | `1024` | 本地 SQLite 历史数据库最大体积上限（单位 MB，最小 16），到 85% 自动清理最旧数据 |
+| `NFM_RETENTION_DAYS` | `90` | 历史趋势与热力图数据最多保留多少天 |
+| `MINDIE_LOG_LEVEL` | `INFO` | 诊断日志级别（`DEBUG` / `INFO` / `WARNING` / `ERROR`） |
+| `MINDIE_DIAGNOSTICS_ROOT` | 系统用户状态目录 | 本地结构化诊断日志存放目录 |
+
+> [!TIP]
+> **旧版本数据库升级提示**：如果你从早期版本升级，请先停掉服务并跑一次迁移脚本为历史库加上容量上限保护：
+> ```bash
+> python3 scripts/migrate-history.py data/monitor.sqlite3 --max-mb 1024
+> ```
+
+---
+
+## 文档导航
+
+| 文档主题 | 中文文档 | English |
+| --- | --- | --- |
+| 文档中心导航 | [docs/README.md](./docs/README.md) | [docs/README.en.md](./docs/README.en.md) |
+| 系统架构、多级采样与判忙规则 | [docs/architecture.zh.md](./docs/architecture.zh.md) | [docs/architecture.md](./docs/architecture.md) |
+| Agent CLI 与 MCP 查卡工具详解 | [docs/agent-access.md](./docs/agent-access.md) | [docs/agent-access.en.md](./docs/agent-access.en.md) |
+| Ascend 950 (A5) 探测与解析说明 | [docs/a5-probing.zh.md](./docs/a5-probing.zh.md) | [docs/a5-probing.md](./docs/a5-probing.md) |
+
+---
+
+## 仓库目录结构
 
 ```text
-名称, 主机, SSH端口, SSH用户, 标签1|标签2
-example-a3-01, 192.0.2.21, 22, root, A3|训练
+npu-top/
+├── npu_top/         # Python 后端包（Web API、自适应采样调度器、npu-smi 解析器、SSH 管理、CLI 与 MCP）
+├── app/             # Web 前端源码（Vite 单页应用，含实时看板与历史热力图）
+├── scripts/         # 打包脚本（build_wheel.sh）与数据库迁移脚本（migrate-history.py）
+├── docs/            # 中英双语技术文档
+├── .agents/skills/  # 随仓库附带的 Agent Skill 说明
+└── tests/           # 单元测试与真实昇腾服务器 npu-smi 输出样本库
 ```
 
-密码候选一行一个。服务对每台尚未配置密钥的主机按顺序尝试，成功即停止；请求完成后不保留候选密码。
+---
 
-文中的 `192.0.2.x` 为 RFC 5737 文档保留地址，仅作示例。
-
-## 与 vllm-ascend-workspace 的关系
-
-本仓库从 `vllm-ascend-workspace` 脚手架拆出。脚手架侧如需拉起本机监控台，应安装本仓库的 wheel 或 `uvx` 调用 `npu-top serve`，不要再部署成常驻多用户服务。本仓库本身不依赖脚手架的任何文件或目录布局。
-
-## 测试与 CI
+## 本地开发与测试
 
 ```bash
 python3 -m pip install .
@@ -185,44 +252,10 @@ python3 -m unittest discover -s tests -v
 npm ci && npm run lint && npm run build
 ```
 
-GitHub Actions 在 Python 3.11/3.12 上对**已安装的包**跑后端测试，并跑前端 lint/build 以及带静态资源的 wheel 构建。打 `v*` tag 时把 wheel 上传为 GitHub Release 资产。
+---
 
-## 设计来源
+## 致谢与许可证
 
-产品交互参考了 [RackTop](https://github.com/Tongzh-SEU/RackTop) 的多服务器资源总览、空闲算力发现和历史热力图思路；实现代码为独立编写，并针对 Ascend 设备与无代理宿主机探测进行了适配。
+多机算力总览、空闲机器发现与历史热力图的交互灵感参考了 [RackTop](https://github.com/Tongzh-SEU/RackTop)；本项目全部代码均为独立编写，并针对昇腾 NPU 设备与免安装 SSH 宿主机探测专门打造。
 
-## License
-
-MIT，见 [LICENSE](LICENSE)。
-
-## Bounded history storage
-
-History stores 15-minute host/device summaries (weighted averages with per-metric
-counts, sample counts, disk peaks and maximum device count). Process, mount and
-container details remain in current snapshots only. Failure history is replaced
-by the latest server error.
-
-`NFM_SQLITE_MAX_MB` defaults to 1024 (minimum 16): SQLite max_page_count caps the
-main database. WAL, shared memory and service logs are additional space; WAL
-checkpointing is automatic and retained WAL size is limited to 8 MiB after reset.
-History queries permit two concurrent executions with a three-second SQL budget.
-Hourly maintenance removes data older than `NFM_RETENTION_DAYS` (default 90) in
-small batches and drops the oldest summary days at 85% capacity. Freed database
-pages are reused. If the hard cap is reached, the history sample is skipped and
-maintenance reclaims space; current in-memory observations remain available.
-
-Before starting this version on an old database, stop the monitor and run:
-
-```sh
-python3 scripts/migrate-history.py data/monitor.sqlite3 --max-mb 1024
-```
-
-Migration streams 250 samples at a time into a new database, checks sample counts,
-integrity and foreign keys, then swaps files. It preserves `monitor.sqlite3.legacy`
-for rollback until service/API validation succeeds. Remove that legacy file only
-after validation to release disk space. A pre-existing migration staging or backup
-file stops migration so interrupted work can be inspected. Never run migration
-while a service or another database writer is active.
-
-
-密钥引导在现有 SQLite servers 记录中保留发送意图及“尚未开始、已完成、结果不确定”三种安装事实；不保存密码。完整旧版汇总数据库会事务升级到 schema 2，保留主机、历史及现有配置。重启、后台 inventory 导入或重复添加同一端点不会清除未决回执，也不会因换一组密码而重发。后续已有监控密钥登录成功可只读确认原结果并结束未决状态；登录失败本身不证明原写入未发生。安装已完成但登录验证失败时，不再次安装；SSH 断连或外部引导命令返回一般错误时，先核对远端结果。`NFM_BOOTSTRAP_COMMAND` 的退出码 0 表示安装完成，77 专用于写入前认证被拒绝（允许下一密码候选）；其他非零退出码表示写入结果不确定。引导命令默认无执行时限。已有本地密钥对不完整时保留文件并报告错误，不生成新的身份覆盖旧身份。
+本项目采用 [MIT License](./LICENSE) 开源。
