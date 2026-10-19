@@ -62,7 +62,7 @@ Because a monitoring snapshot can become outdated the moment another user starts
   2. AICore utilization is above `1%`;
   3. HBM usage exceeds `NFM_HBM_BUSY_THRESHOLD_MB` (default `8192 MB`). Why 8 GB? Because idle A3 (910C) cards hold roughly 6 GB of resident driver HBM per card — setting the fallback threshold at 8192 MB catches hidden cross-container memory usage without falsely marking idle A3 cards as busy.
 - **No Overlapping Cycles & Cross-Platform SSH**:
-  A new polling cycle is scheduled only after the previous cycle finishes, preventing SSH backlog buildup. On Linux and macOS, `ControlPersist` reuses authenticated SSH sockets under a short path; on native Windows, unsupported Unix-domain socket options are omitted automatically and generated private keys receive a current-user-only Windows ACL.
+  A new polling cycle is scheduled only after the previous cycle finishes, preventing SSH backlog buildup. On Linux and macOS, `ControlPersist` reuses authenticated SSH sockets under a short path; on native Windows, unsupported Unix-domain socket options are omitted automatically, while local state directories (`0700`), SSH keys (`0600`), and atomic `os.replace` file updates avoid extra Windows ACL ceremonies.
 
 ---
 
