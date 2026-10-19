@@ -1,17 +1,9 @@
-"""Parsers for ``npu-smi info`` and ``npu-smi info -t usages`` text output.
+"""Parsers for `npu-smi info` and `npu-smi info -t usages` text output.
 
-The monitor owns this parser so that it never has to locate another project
-on disk to interpret Ascend devices. The layouts handled here are:
-
-* the two-row device table (one ``NPU Name | Health | Power Temp`` header row
-  followed by one or more ``Chip [Phy-ID] | Bus-Id | AICore Memory HBM``
-  rows, as printed by 910B-class and A3/910C-class drivers);
-* the process table in both the ``NPU Chip | PID | Name | Memory`` and the
-  older flat ``NPU | PID | Name | Memory`` layouts;
-* the single-ID four-column Ascend950/A5 table and chipless process rows;
-* the ``key : value`` blocks printed by ``npu-smi info -t usages``.
-
-Everything returned here is *observed* device state at collection time.
+[Role] Parses Ascend A2 (910B single-die), A3 (910C dual-die with `Phy-ID`), 310P, and A5 (Ascend950 single-ID) `npu-smi` tables.
+[Invariants] Aggregates multi-die HBM and maximum AICore utilization per logical NPU card while preserving per-die `chip_id`/`phy_id` mappings.
+[Timeouts & Locks] Pure string parsing; zero subprocesses, network, or locks.
+[Side-Effect Policy] Side-effect free.
 """
 
 from __future__ import annotations
@@ -137,8 +129,13 @@ def parse_npu_smi_info(text: str) -> dict[str, Any]:
             metrics = _HEADER_METRICS.match(" ".join(cells[1:]))
             if metrics:
                 current["health"] = metrics.group("health")
-                current["power_w"] = _number(metrics.group("power"))
-                current["temperature_c"] = _number(metrics.group("temp"))
+                power = _number(metrics.group("power"))
+                if power is not None:
+                    current["power_w"] = power
+                temp = _number(metrics.group("temp"))
+                if temp is not None:
+                    prev_temp = current["temperature_c"]
+                    current["temperature_c"] = max(prev_temp, temp) if prev_temp is not None else temp
             continue
 
         if _INT_CELL.match(first) and len(cells) >= 2 and current is not None:

@@ -1,8 +1,9 @@
 """OpenSSH access for host probes: dedicated key, known_hosts, base command.
 
-This module knows nothing about where the monitor is deployed or which
-project manages the hosts. It only owns the monitor's private Ed25519 key,
-its isolated ``known_hosts`` file, and the OpenSSH options used for probes.
+[Role] Manages the monitor-owned Ed25519 keypair, isolated `known_hosts`, and OpenSSH command construction.
+[Invariants] Distinguishes `completed`, `not_started` (`authentication_rejected`), and `unknown` key-installation outcomes so uncertain remote writes are never replayed.
+[Timeouts & Locks] `ssh-keygen` bounded to `15s`, `ssh -G` preflight to `8s`, key auth check to `12s`, key install to `15s` (`ConnectTimeout=8`).
+[Side-Effect Policy] Local key generation under `state_dir/keys` and explicit `~/.ssh/authorized_keys` append during bootstrap.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import os
 import re
 import shlex
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,15 @@ def validate_endpoint(host: str, port: int, username: str) -> None:
         raise ValueError("SSH 用户名包含不支持的字符")
     if port < 1 or port > 65535:
         raise ValueError("SSH 端口必须在 1 到 65535 之间")
+
+
+@dataclass(frozen=True)
+class KeyInstallResult:
+    state: str
+    error: str | None = None
+    authentication_rejected: bool = False
+    receipt: dict[str, Any] | None = None
+    recording_error: str | None = None
 
 
 class SshAccess:
@@ -58,6 +69,23 @@ class SshAccess:
             self._secure_key_permissions()
             return self.private_key
         self.private_key.parent.mkdir(parents=True, exist_ok=True)
+        if self.private_key.exists() and not self.public_key.exists():
+            derived = subprocess.run(
+                ["ssh-keygen", "-y", "-f", str(self.private_key)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            if derived.returncode == 0 and derived.stdout.strip():
+                self.public_key.write_text(derived.stdout, encoding="utf-8")
+                self._secure_key_permissions()
+                return self.private_key
+            self.private_key.unlink(missing_ok=True)
+        if self.public_key.exists() or self.public_key.is_symlink():
+            self.public_key.unlink(missing_ok=True)
         result = subprocess.run(
             ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "npu-fleet-monitor", "-f", str(self.private_key)],
             stdin=subprocess.DEVNULL,
@@ -78,20 +106,6 @@ class SshAccess:
         self.private_key.chmod(0o600)
         if self.public_key.exists():
             self.public_key.chmod(0o600)
-        if self.is_windows:
-            identity = subprocess.run(
-                ["whoami"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, timeout=5, check=False,
-            )
-            user = identity.stdout.strip()
-            if identity.returncode != 0 or not user:
-                raise RuntimeError("无法确定当前 Windows 用户，不能收紧监控私钥 ACL")
-            acl = subprocess.run(
-                ["icacls", str(self.private_key), "/inheritance:r", "/grant:r", f"{user}:(R,W)"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10, check=False,
-            )
-            if acl.returncode != 0:
-                raise RuntimeError((acl.stderr or acl.stdout or "icacls failed")[-1000:])
         self._key_permissions_ready = True
 
     def ssh_base(self, server: dict[str, Any], *, batch_mode: bool = True) -> list[str]:
@@ -154,9 +168,6 @@ class SshAccess:
             return False, f"SSH 连接失败：{error or f'exit {result.returncode}'}"
         return False, None
 
-    def key_auth_works(self, server: dict[str, Any]) -> bool:
-        return self.check_key_auth(server)[0]
-
     def _default_identity_base(self, server: dict[str, Any]) -> list[str]:
         """ssh command that uses the invoking user's own default identities."""
         validate_endpoint(server["host"], int(server["port"]), server["username"])
@@ -167,28 +178,38 @@ class SshAccess:
             "-p", str(server["port"]), f"{server['username']}@{server['host']}",
         ]
 
-    def install_key_with_default_identity(self, server: dict[str, Any]) -> bool:
-        """Append the monitor public key using an already trusted identity."""
+    def install_key_with_default_identity(self, server: dict[str, Any]) -> KeyInstallResult:
+        """Preserve the write outcome separately from later key verification."""
         try:
             check = subprocess.run(
                 [*self._default_identity_base(server), "true"], stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=12, check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=12, check=False,
                 cwd=self.working_dir,
             )
-            if check.returncode != 0:
-                return False
-            public_key = self.public_key.read_text(encoding="utf-8").strip()
-            quoted = shlex.quote(public_key)
-            remote = (
-                "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys; "
-                "chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys; "
-                f"grep -qxF {quoted} ~/.ssh/authorized_keys 2>/dev/null || printf '%s\\n' {quoted} >> ~/.ssh/authorized_keys"
-            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return KeyInstallResult("not_started", f"默认身份连接检查失败：{type(exc).__name__}")
+        if check.returncode != 0:
+            error = " ".join(check.stderr.split())[-500:]
+            rejected = "Permission denied" in error
+            return KeyInstallResult("not_started", error or f"SSH exit {check.returncode}", rejected)
+        public_key = self.public_key.read_text(encoding="utf-8").strip()
+        quoted = shlex.quote(public_key)
+        remote = (
+            "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && "
+            "chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys && "
+            f"(grep -qxF {quoted} ~/.ssh/authorized_keys; code=$?; "
+            f"case $code in 0) ;; 1) printf '%s\\n' {quoted} >> ~/.ssh/authorized_keys ;; *) exit $code ;; esac)"
+        )
+        try:
             install = subprocess.run(
                 [*self._default_identity_base(server), "sh", "-c", shlex.quote(remote)], stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=15, check=False,
                 cwd=self.working_dir,
             )
-            return install.returncode == 0 and self.key_auth_works(server)
-        except (OSError, subprocess.TimeoutExpired):
-            return False
+        except subprocess.TimeoutExpired:
+            return KeyInstallResult("unknown", "密钥安装超时；远端授权文件写入结果不确定，请先核对")
+        except OSError as exc:
+            return KeyInstallResult("not_started", f"无法启动密钥安装：{type(exc).__name__}")
+        if install.returncode == 0:
+            return KeyInstallResult("completed")
+        return KeyInstallResult("unknown", "密钥安装未获完整成功确认；请先核对远端授权文件")

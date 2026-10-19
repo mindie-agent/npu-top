@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from npu_top.inventory import (
-    LOW_PRIORITY_TAG, ExternalKeyBootstrap, HostPoolFile, MachineInventoryFile, merge_sources,
+    LOW_PRIORITY_TAG, ExternalKeyBootstrap, HostPoolFile, InventoryError, MachineInventoryFile, merge_sources,
 )
 from npu_top.settings import Settings
 
@@ -23,8 +23,6 @@ class InventoryTests(unittest.TestCase):
                     "host": {"ip": "198.51.100.10", "port": 22, "user": "root", "machine_type": "A3", "password": "nope"},
                     "container": {"name": "ignored", "ssh_port": 30022},
                 },
-                {"alias": "bad", "host": {"ip": "-oProxyCommand=x", "port": 22, "user": "root"}},
-                "not-a-machine",
             ]}), encoding="utf-8")
             servers = MachineInventoryFile(path).servers()
         self.assertEqual(len(servers), 1)
@@ -61,10 +59,30 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(extra["tags"], [LOW_PRIORITY_TAG])
         self.assertFalse(extra["workspace_enabled"])
 
-    def test_missing_files_are_empty_sources(self) -> None:
+    def test_explicit_missing_files_fail_and_no_sources_is_empty(self) -> None:
         missing = Path("/nonexistent/inventory.json")
-        self.assertEqual(MachineInventoryFile(missing).servers(), [])
-        self.assertEqual(HostPoolFile(missing).servers(), [])
+        for source in (MachineInventoryFile(missing), HostPoolFile(missing)):
+            with self.assertRaisesRegex(InventoryError, "unavailable"):
+                source.servers()
+        self.assertEqual(merge_sources([]), [])
+
+    def test_invalid_inventory_never_returns_a_partial_fleet(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "inventory.json"
+            valid = {"host": {"ip": "198.51.100.10"}}
+            for value in ("{", "[]", "{}", '{"machines": {}}',
+                          json.dumps({"machines": [valid, "secret-canary"]}),
+                          json.dumps({"machines": [valid, {"host": {"ip": "-bad-secret-canary"}}]})):
+                path.write_text(value, encoding="utf-8")
+                with self.assertRaises(InventoryError) as caught:
+                    MachineInventoryFile(path).servers()
+                self.assertNotIn("secret-canary", str(caught.exception))
+
+    def test_malformed_explicit_setting_is_not_replaced_by_default(self) -> None:
+        for value in ("bad", "0"):
+            with mock.patch.dict("os.environ", {"NFM_PORT": value}):
+                with self.assertRaisesRegex(ValueError, "NFM_PORT"):
+                    Settings.load()
 
     def test_settings_parse_path_lists_and_bootstrap_command(self) -> None:
         env = {

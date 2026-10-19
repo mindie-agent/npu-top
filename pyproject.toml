@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "npu-top"
-version = "0.1.6"
+version = "0.1.7"
 description = "Local-only Ascend NPU fleet monitor"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-dependencies = ["mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@c62c1a6553a293e77b8b98d3523c5d7ff208188f"]
+dependencies = ["mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@7da7f66d119098e0515f8f37bfd5e7cf8cc32fee"]
 authors = [{ name = "vllm-ascend-workspace" }]
 
 [project.scripts]
@@ -27,3 +27,13 @@ packages = ["npu_top"]
 
 [tool.hatch.build.hooks.custom]
 path = "hatch_build.py"
+
+[tool.pytest.ini_options]
+pythonpath = [".", "tests"]
+addopts = "-m 'not live_npu'"
+markers = [
+    "unit: pure in-memory unit and contract tests",
+    "integration: local HTTP/SQLite/process integration tests",
+    "live_npu: real SSH tests against live Ascend A2/A3 nodes",
+]
+

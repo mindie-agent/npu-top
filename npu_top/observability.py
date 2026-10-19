@@ -1,4 +1,10 @@
-"""Interpret monitor outcomes without making observations an allocation source."""
+"""Diagnostic operation wrappers for `npu-top` HTTP, CLI, MCP, and collector entry points.
+
+[Role] Wraps entry points with `mindie_diagnostics` operations and classifies `argparse` errors as `caller`.
+[Invariants] Preserves original exceptions and return values while recording operation status and HTTP error codes.
+[Timeouts & Locks] Uses `ContextVar` (`_ACTIVE`) for per-thread/coroutine operation correlation; zero locks.
+[Side-Effect Policy] Emits structured diagnostic events via `mindie_diagnostics`.
+"""
 from contextvars import ContextVar
 from functools import wraps
 
@@ -11,6 +17,8 @@ def capture_failure(error, category="internal_error"):
     operation = _ACTIVE.get()
     if operation is not None:
         operation.fail(category, exception=error)
+        return operation.summary()["operation_id"]
+    return None
 
 
 def record_http_status(status):

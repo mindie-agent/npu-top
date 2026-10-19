@@ -1,3 +1,10 @@
+"""SSH host probe and parser for NPU, CPU, memory, disk, mount, Docker, and `/proc` telemetry.
+
+[Role] Executes bounded remote shell probes over SSH and parses raw sections into structured host snapshots.
+[Invariants] Observation-only; `npu_info_rc` gates NPU health while optional `usages`/Docker/process-detail failures degrade gracefully without hiding NPU errors.
+[Timeouts & Locks] Remote `npu-smi` commands use inner `timeout 8`; outer SSH timeout is `max(ssh_timeout + 12, 32)` when infrastructure is included (`>= sum(inner_budgets) + grace`).
+[Side-Effect Policy] Read-only remote SSH probes (`/proc`, `df`, `findmnt`, `docker ps/stats/info`, `npu-smi info`); never mutates remote host state.
+"""
 from __future__ import annotations
 
 import base64
@@ -310,28 +317,13 @@ def attach_process_details(
                 "cwd": detail.get("cwd"),
                 "command": detail.get("command"),
                 "executable": detail.get("executable"),
+                "details_observed_at": detail.get("details_observed_at"),
                 "container": container,
                 "ownership_labels": extract_ownership_labels(
                     detail.get("cwd"), (container or {}).get("name"),
                 ),
             })
         device["processes"] = enriched
-
-
-def attach_npu_telemetry(devices: list[dict[str, Any]], info: str) -> None:
-    details: dict[int, dict[str, float | str]] = {}
-    for line in info.splitlines():
-        match = re.search(
-            r"\|\s*(\d+)\s+([A-Za-z0-9_.-]+)\s+\|\s*([A-Za-z_.-]+)\s+(?:\|\s*)?(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)",
-            line,
-        )
-        if match and not match.group(2).isdigit():
-            details[int(match.group(1))] = {
-                "name": match.group(2), "health": match.group(3),
-                "power_w": float(match.group(4)), "temperature_c": float(match.group(5)),
-            }
-    for device in devices:
-        device.update(details.get(int(device["npu_id"]), {}))
 
 
 def is_device_busy(device: dict[str, Any], hbm_threshold_mb: int) -> bool:
@@ -367,16 +359,25 @@ class HostProbe:
             result.stderr.decode("utf-8", errors="replace"),
         )
 
-    def _collect_process_details(self, server: dict[str, Any], pids: list[int]) -> dict[int, dict[str, Any]]:
+    def _collect_process_details(self, server: dict[str, Any], pids: list[int]) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
         if not pids:
-            return {}
+            return {}, {"state": "unchanged"}
         try:
             result = self._run_script(server, build_process_detail_script(pids), min(self.timeout, 15))
-        except (OSError, subprocess.TimeoutExpired):
-            return {}
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {}, {"state": "unavailable", "stage": "process_details", "error_type": type(exc).__name__}
         if result.returncode != 0:
-            return {}
-        return parse_process_details(split_sections(result.stdout).get("process_details", ""))
+            return {}, {"state": "unavailable", "stage": "process_details", "exit_code": result.returncode,
+                        "error": (result.stderr or "process detail probe failed")[-800:]}
+        sections = split_sections(result.stdout)
+        if "process_details" not in sections:
+            return {}, {"state": "unavailable", "stage": "process_details", "error": "probe response missing process_details"}
+        observed_at = int(time.time())
+        details = parse_process_details(sections["process_details"])
+        for detail in details.values():
+            detail["details_observed_at"] = observed_at
+        # A process can exit between the device sample and /proc lookup.
+        return details, {"state": "observed", "observed_at": observed_at}
 
     def collect(self, server: dict[str, Any], include_infrastructure: bool) -> dict[str, Any]:
         started = time.monotonic()
@@ -389,8 +390,9 @@ class HostProbe:
         # driver/runtime versions. Their non-zero status must not replace the
         # explicit npu_info_rc health gate above.
         script = FAST_SCRIPT + (INFRA_SCRIPT if include_infrastructure else "") + "\nexit 0\n"
+        effective_timeout = max(self.timeout + 12, 32) if include_infrastructure else self.timeout
         try:
-            result = self._run_script(server, script, self.timeout + (12 if include_infrastructure else 0))
+            result = self._run_script(server, script, effective_timeout)
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"SSH 探查超时（{exc.timeout:g}s）") from exc
         if result.returncode != 0:
@@ -410,7 +412,6 @@ class HostProbe:
         memory = parse_meminfo(sections.get("meminfo", ""))
         npu = self.adapter.parse_npu(sections.get("npu_info", ""), sections.get("npu_usages", ""))
         devices = npu.get("devices", [])
-        attach_npu_telemetry(devices, sections.get("npu_info", ""))
         for device in devices:
             device["busy"] = is_device_busy(device, self.hbm_busy_threshold_mb)
 
@@ -434,7 +435,11 @@ class HostProbe:
         })
         process_cache = self._process_cache.setdefault(server_id, {})
         stale_pids = active_pids if include_infrastructure else [pid for pid in active_pids if pid not in process_cache]
-        process_cache.update(self._collect_process_details(server, stale_pids))
+        details, detail_status = self._collect_process_details(server, stale_pids)
+        # A failed refresh cannot relabel old PID metadata as newly observed.
+        for pid in stale_pids:
+            process_cache.pop(pid, None)
+        process_cache.update(details)
         self._process_cache[server_id] = {pid: process_cache[pid] for pid in active_pids if pid in process_cache}
         attach_process_details(devices, self._process_cache[server_id], infrastructure["docker"])
 
@@ -456,6 +461,7 @@ class HostProbe:
             "server_id": server_id, "collected_at": int(time.time()), "duration_ms": duration_ms,
             "hostname": sections.get("hostname") or server["name"], "summary": summary,
             "devices": devices, **infrastructure,
+            "process_details": detail_status,
         }
 
 

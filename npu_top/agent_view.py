@@ -1,10 +1,9 @@
 """Compact, agent-facing views over collector snapshots.
 
-Everything produced here is *observed state*: what the collector saw on a
-host at ``observed_at``. It is not an allocation ledger. Which NPUs an agent
-may use is decided by the host-side coordinator queue, never by this monitor.
-Every payload therefore carries the same ``observation`` envelope so that a
-consumer cannot mistake a snapshot for a grant.
+[Role] Projects raw collector snapshots into agent-oriented `servers`, `npu_status`, `server_status`, and `capacity_candidates` payloads.
+[Invariants] Every payload carries an `observation` envelope (`allocation_authority=False`); never grants or reserves NPU devices.
+[Timeouts & Locks] Pure in-memory projection; zero I/O or locks.
+[Side-Effect Policy] Side-effect free.
 """
 
 from __future__ import annotations
@@ -67,6 +66,7 @@ def _process(process: dict[str, Any], detailed: bool) -> dict[str, Any]:
             "cwd": process.get("cwd"),
             "command": process.get("command"),
             "executable": process.get("executable"),
+            "observed_at": process.get("details_observed_at"),
         })
     return {key: value for key, value in result.items() if value not in (None, [], "")}
 
@@ -171,6 +171,9 @@ def npu_status(
             "hbm_total_mb": summary.get("hbm_total_mb") or 0,
         },
         "devices": devices,
+        **({"recording": snapshot["recording"]} if snapshot and "recording" in snapshot else {}),
+        **({"process_details": (snapshot or {}).get("process_details", {"state": "not_observed"})}
+           if include_processes or detailed_processes else {}),
         **({"error": str((snapshot or {}).get("error") or server.get("last_error"))[-240:]} if compact["status"] == "offline" else {}),
     }
 

@@ -1,7 +1,43 @@
 {
-  "capture_date": "2026-09-14",
+  "capture_date": "2026-10-18",
   "capture_method": "Monitor WorkspaceDeviceAdapter SSH transport; FAST_SCRIPT sections, outer section framing removed. Raw table text retained.",
   "samples": [
+    {
+      "hardware": "A2",
+      "host": "173.125.1.2",
+      "npu_smi_version": "25.2.2",
+      "commands": [
+        {
+          "command": "npu-smi info",
+          "file": "a2-173-125-1-2.txt",
+          "sha256": "e40acf8f0ddb1fa24688f67a2e30bbde82980ab25b56bb936c2597e3543b8ead"
+        }
+      ]
+    },
+    {
+      "hardware": "A3",
+      "host": "192.168.13.165",
+      "npu_smi_version": "26.0.rc1",
+      "commands": [
+        {
+          "command": "npu-smi info",
+          "file": "a3-192-168-13-165-idle.txt",
+          "sha256": "5e51dc476d36609147a31565aa3ec85ddf400e18f86e73ae943b173907d5a605"
+        }
+      ]
+    },
+    {
+      "hardware": "A3",
+      "host": "192.168.13.154",
+      "npu_smi_version": "25.5.3",
+      "commands": [
+        {
+          "command": "npu-smi info",
+          "file": "a3-192-168-13-154-busy.txt",
+          "sha256": "afda0077a749c17b143d01f6974de01cba95272f5c92f40695b4c13b452a6f0e"
+        }
+      ]
+    },
     {
       "hardware": "A3",
       "host": "80.5.17.106",

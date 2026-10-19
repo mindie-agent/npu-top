@@ -96,8 +96,10 @@ def test_failed_probe_records_actual_worker_duration(diagnostic_root):
     assert db.duration >= 20
     assert snapshot["probe_duration_ms"] == db.duration
     assert snapshot["status"] == "offline"
-    event = [row for row in records(diagnostic_root) if row["event"] == "operation.end"][-1]
+    event = [row for row in records(diagnostic_root)
+             if row["event"] == "operation.end" and row.get("operation") == "top.probe"][-1]
     assert event["status"] == "error" and event["attributes"]["error_type"] == "TimeoutError"
+    assert snapshot["recording"]["state"] == "recorded"
 
 
 def test_mcp_caught_fault_keeps_protocol_and_diagnostic(diagnostic_root):

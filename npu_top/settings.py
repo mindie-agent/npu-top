@@ -1,3 +1,10 @@
+"""Environment-driven configuration for `npu-top`.
+
+[Role] Parses and validates `NFM_*` environment variables into an immutable `Settings` dataclass.
+[Invariants] Rejects malformed or out-of-range explicit settings with `ValueError` instead of silently falling back to defaults.
+[Timeouts & Locks] Default `ssh_timeout=20s` exceeds inner `timeout 8` `npu-smi` commands; zero locks.
+[Side-Effect Policy] `prepare()` creates `state_dir`, `keys`, and `ssh-control` directories (`0o700`).
+"""
 from __future__ import annotations
 
 import os
@@ -10,9 +17,12 @@ def _number(name: str, default: int, minimum: int) -> int:
     if raw is None:
         return default
     try:
-        return max(minimum, int(raw))
-    except ValueError:
-        return default
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer >= {minimum}") from exc
+    if value < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    return value
 
 
 def _paths(name: str) -> tuple[Path, ...]:
@@ -61,7 +71,7 @@ class Settings:
             infrastructure_interval=_number("NFM_INFRA_INTERVAL_SECONDS", 60, 15),
             retention_days=_number("NFM_RETENTION_DAYS", 90, 1),
             max_workers=_number("NFM_MAX_WORKERS", 8, 1),
-            ssh_timeout=_number("NFM_SSH_TIMEOUT_SECONDS", 12, 2),
+            ssh_timeout=_number("NFM_SSH_TIMEOUT_SECONDS", 20, 2),
             sqlite_max_mb=_number("NFM_SQLITE_MAX_MB", 1024, 16),
             hbm_busy_threshold_mb=_number("NFM_HBM_BUSY_THRESHOLD_MB", 8192, 1),
             inventory_files=_paths("NFM_INVENTORY_FILES"),
