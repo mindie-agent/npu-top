@@ -33,7 +33,7 @@ jobs:
           HOME: ${{ runner.temp }}/empty-home
         run: |
           mkdir -p "$HOME"
-          python3 -m pytest -q "${{ github.workspace }}/tests"
+          python3 -m pytest -q "${{ github.workspace }}/tests" -m "not live_npu"
 
   frontend-build:
     name: frontend lint and build
