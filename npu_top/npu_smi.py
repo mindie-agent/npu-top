@@ -1,7 +1,7 @@
-"""Parsers for `npu-smi info` and `npu-smi info -t usages` text output.
+"""Parsers for `npu-smi info`, `-t usages`, and `-t common` text output.
 
-[Role] Parses Ascend A2 (910B single-die), A3 (910C dual-die with `Phy-ID`), 310P, and A5 (Ascend950 single-ID) `npu-smi` tables.
-[Invariants] Aggregates multi-die HBM and maximum AICore utilization per logical NPU card while preserving per-die `chip_id`/`phy_id` mappings.
+[Role] Parses Ascend A2 (910B single-die), A3 (910C dual-die with `Phy-ID`), 310P, and A5 (Ascend950 single-ID) `npu-smi` tables, including the card-scoped current/rated AICore frequency from `-t common`.
+[Invariants] Aggregates multi-die HBM and maximum AICore utilization per logical NPU card while preserving per-die `chip_id`/`phy_id` mappings; a missing current frequency is never filled from the rated maximum.
 [Timeouts & Locks] Pure string parsing; zero subprocesses, network, or locks.
 [Side-Effect Policy] Side-effect free.
 """
@@ -25,6 +25,8 @@ _INT_CELL = re.compile(r"^\d+(?:\s+\d+)?$")
 # "0 910B4" / "3 Ascend910" start a logical device; "0 0" (chip, phy-id) does not.
 _HEADER_CELL = re.compile(r"^(\d+)\s+(?!\d+$)([A-Za-z0-9][A-Za-z0-9_.-]*)$")
 _USAGE_LINE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9 ()%/_.-]*?)\s*:\s*(.*?)\s*$")
+_COMMON_CURRENT_FREQ = "aicore curfreq(mhz)"
+_COMMON_MAX_FREQ = "aicore freq(mhz)"
 
 
 def _cells(line: str) -> list[str] | None:
@@ -217,6 +219,61 @@ def apply_usage_overrides(devices: list[dict[str, Any]], usages: dict[int, dict[
             device["aicore_percent"] = max(utilizations) if utilizations else device.get("aicore_percent")
         elif usage.get("aicore_percent") is not None:
             device["aicore_percent"] = usage["aicore_percent"]
+
+
+def parse_npu_common(text: str) -> dict[int, dict[str, Any]]:
+    """Parse ``npu-smi info -t common -i <card>`` current/rated AICore frequency.
+
+    ``Aicore curFreq(MHZ)`` is the observed operating frequency and maps to
+    ``freq_mhz``; ``Aicore Freq(MHZ)`` is the rated maximum and maps to
+    ``freq_max_mhz``. A missing current-frequency field stays ``None`` so a
+    rated clock is never substituted for the observed one. Per-chip values are
+    preserved under ``chips``; the card-level value is the maximum observed
+    current frequency across dies.
+    """
+    devices: dict[int, dict[str, Any]] = {}
+    current: dict[str, Any] | None = None
+    chip_id: int | None = None
+    for line in text.splitlines():
+        match = _USAGE_LINE.match(line)
+        if not match:
+            continue
+        key = re.sub(r"\s+", " ", match.group(1)).strip().casefold()
+        value = match.group(2).strip()
+        if key == "npu id":
+            number = _number(value)
+            if number is None or number != int(number):
+                current = None
+                chip_id = None
+                continue
+            npu_id = int(number)
+            current = devices.setdefault(npu_id, {
+                "npu_id": npu_id, "freq_mhz": None, "freq_max_mhz": None, "chips": {},
+            })
+            chip_id = None
+            continue
+        if current is None:
+            continue
+        if key == "chip id":
+            number = _number(value)
+            if number is None or number != int(number):
+                chip_id = None
+            else:
+                chip_id = int(number)
+                current["chips"].setdefault(chip_id, {"freq_mhz": None, "freq_max_mhz": None})
+            continue
+        if key not in (_COMMON_CURRENT_FREQ, _COMMON_MAX_FREQ):
+            continue
+        number = _number(value)
+        if number is None or number < 0:
+            continue
+        field = "freq_mhz" if key == _COMMON_CURRENT_FREQ else "freq_max_mhz"
+        chip = current["chips"].get(chip_id) if chip_id is not None else None
+        if chip is not None:
+            chip[field] = number
+        previous = current[field]
+        current[field] = number if previous is None else max(previous, number)
+    return devices
 
 
 def parse_npu(info: str, usages: str = "") -> dict[str, Any]:

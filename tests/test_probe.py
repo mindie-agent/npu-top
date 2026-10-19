@@ -318,5 +318,25 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(observed_timeouts, [20, 32])
 
 
+    def test_probe_collect_preserves_fractional_timestamp(self) -> None:
+        from npu_top.probe import HostProbe
+
+        adapter = mock.MagicMock()
+        adapter.preflight.return_value = {"ok": True}
+        adapter.parse_npu.return_value = {"devices": [], "process_records": []}
+        probe = HostProbe(adapter, timeout=20)
+        result = subprocess.CompletedProcess(
+            [], 0, "__NFM_SECTION__proc_stat\ncpu  100 0 50 850 0 0 0 0\n__NFM_SECTION__npu_info_rc\n0\n", "",
+        )
+        with mock.patch.object(probe, "_run_script", return_value=result), mock.patch(
+            "npu_top.probe.time.time_ns", return_value=1_700_000_000_123_456_789,
+        ):
+            snapshot = probe.collect(
+                {"id": "s1", "name": "s1", "host": "10.0.0.1"}, include_infrastructure=False,
+            )
+        self.assertEqual(snapshot["collected_at_ns"], 1_700_000_000_123_456_789)
+        self.assertAlmostEqual(snapshot["collected_at"], 1_700_000_000.123456789, places=6)
+
+
 if __name__ == "__main__":
     unittest.main()

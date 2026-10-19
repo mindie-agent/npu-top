@@ -13,6 +13,30 @@
         "{python}",
         "benchmarks/release.py"
       ]
+    },
+    {
+      "id": "dcmi-cause-decoding",
+      "kind": "microbenchmark",
+      "required": true,
+      "repetitions": 5,
+      "timeout_seconds": 20,
+      "command": [
+        "{python}",
+        "benchmarks/telemetry.py",
+        "decode"
+      ]
+    },
+    {
+      "id": "dcmi-persisted-fractional-window",
+      "kind": "microbenchmark",
+      "required": true,
+      "repetitions": 5,
+      "timeout_seconds": 20,
+      "command": [
+        "{python}",
+        "benchmarks/telemetry.py",
+        "persist"
+      ]
     }
   ]
 }

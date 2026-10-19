@@ -15,7 +15,6 @@ import time
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -29,6 +28,7 @@ from .db import Database
 from .device_adapter import DeviceAdapter
 from .scheduler import AdaptiveScheduler
 from .settings import Settings
+from .telemetry_window import build_window, seconds_to_ns
 from .observability import observed, capture_failure, record_http_status
 from mindie_diagnostics import get_recorder
 
@@ -147,12 +147,50 @@ class App:
 
     def agent_capacity(
         self, min_idle_npus: int, max_age_seconds: int, tags: list[str], include_disabled: bool,
+        *, min_weight_mount_avail_gb: float = 0.0, prefer_same_package: bool = True,
+        exclude_throttled: bool = True,
     ) -> dict[str, Any]:
         if not 0 <= min_idle_npus <= 64 or not 0 <= max_age_seconds <= 86400:
             raise AgentQueryError("capacity limits are out of range")
+        if not 0 <= min_weight_mount_avail_gb <= 1024 * 1024:
+            raise AgentQueryError("min_weight_mount_avail_gb is out of range")
         return capacity_candidates(
             self.db.list_servers(), self.scheduler.snapshots(), min_idle_npus=min_idle_npus,
             max_age_seconds=max_age_seconds, tags=tags, include_disabled=include_disabled,
+            min_weight_mount_avail_gb=min_weight_mount_avail_gb,
+            prefer_same_package=prefer_same_package,
+            exclude_throttled=exclude_throttled,
+        )
+
+    def agent_telemetry_window(
+        self, host: str, devices: list[int], start_ts: int | float | str, end_ts: int | float | str,
+    ) -> dict[str, Any]:
+        if not devices or len(devices) > 256:
+            raise AgentQueryError("devices must contain 1 to 256 NPU ids")
+        if len(set(devices)) != len(devices) or any(
+            isinstance(device, bool) or not isinstance(device, int) or device < 0 for device in devices
+        ):
+            raise AgentQueryError("devices must be unique non-negative integers")
+        try:
+            start_ns = seconds_to_ns(start_ts)
+            end_ns = seconds_to_ns(end_ts)
+        except ValueError as exc:
+            raise AgentQueryError("start_ts and end_ts must be finite Unix seconds") from exc
+        if start_ns < 0 or end_ns <= start_ns:
+            raise AgentQueryError("start_ts and end_ts must satisfy 0 <= start_ts < end_ts")
+        if end_ns - start_ns > 90 * 86400 * 1_000_000_000:
+            raise AgentQueryError("telemetry window must not exceed 90 days")
+        server, _snapshot = find_server(host, self.db.list_servers(), self.scheduler.snapshots())
+        window_data = self.db.telemetry_samples(
+            server["id"], devices, start_ns / 1_000_000_000, end_ns / 1_000_000_000,
+            start_ts_ns=start_ns, end_ts_ns=end_ns,
+        )
+        return build_window(
+            server, window_data["samples"], devices=devices,
+            start_ts=start_ns / 1_000_000_000, end_ts=end_ns / 1_000_000_000,
+            start_ts_ns=start_ns, end_ts_ns=end_ns,
+            runs=window_data["runs"],
+            rollup_sample_count=window_data["rollup_sample_count"],
         )
 
 
@@ -286,13 +324,35 @@ class Handler(BaseHTTPRequestHandler):
                     int(query.get("min_idle_npus", ["1"])[0]),
                     int(query.get("max_age_seconds", ["300"])[0]), tags,
                     query.get("include_disabled", ["0"])[0] in ("1", "true", "yes"),
+                    min_weight_mount_avail_gb=float(query.get("min_weight_mount_avail_gb", ["0"])[0]),
+                    prefer_same_package=query.get("prefer_same_package", ["1"])[0] in ("1", "true", "yes"),
+                    exclude_throttled=query.get("exclude_throttled", ["1"])[0] in ("1", "true", "yes"),
                 ))
             except AgentQueryError as exc:
                 if exc.status >= 500:
                     capture_failure(exc, "http_request_failed")
                 return self.json_response({"error": str(exc)}, exc.status)
             except ValueError:
-                return self.json_response({"error": "capacity parameters must be integers"}, HTTPStatus.BAD_REQUEST)
+                return self.json_response({"error": "capacity parameters are invalid"}, HTTPStatus.BAD_REQUEST)
+        if parsed.path == "/api/agent/telemetry-window":
+            query = parse_qs(parsed.query)
+            try:
+                devices: list[int] = []
+                for raw in query.get("devices", []):
+                    devices.extend(int(part) for part in raw.split(",") if part.strip())
+                start_ts = query["start_ts"][0]
+                end_ts = query["end_ts"][0]
+                return self.json_response(self.app.agent_telemetry_window(
+                    query.get("host", [""])[0], devices, start_ts, end_ts,
+                ))
+            except AgentQueryError as exc:
+                if exc.status >= 500:
+                    capture_failure(exc, "http_request_failed")
+                return self.json_response({"error": str(exc)}, exc.status)
+            except (KeyError, ValueError):
+                return self.json_response({
+                    "error": "host, devices, and finite Unix start_ts/end_ts are required; devices must be comma-separated integers",
+                }, HTTPStatus.BAD_REQUEST)
         if parsed.path == "/api/servers":
             return self.json_response({"servers": self.app.db.list_servers()})
         if parsed.path == "/api/history":
