@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import sqlite3
 import tempfile
 import threading
@@ -763,12 +764,13 @@ class TelemetryWindowMcpTests(unittest.TestCase):
         self.assertTrue(response["result"]["isError"])
 
 
-FULL_DCMI_CAPTURE = Path(
-    "/Volumes/data/temp/mindie-003-execution/execution-lane/npu-stage1/c4-environment/dcmi-metrics.jsonl"
+FULL_DCMI_CAPTURE = (
+    Path(os.environ["MINDIE_TEST_DCMI_CAPTURE"])
+    if os.environ.get("MINDIE_TEST_DCMI_CAPTURE") else None
 )
 
 
-@unittest.skipUnless(FULL_DCMI_CAPTURE.is_file(), "full immutable DCMI capture is unavailable")
+@unittest.skipUnless(FULL_DCMI_CAPTURE is not None, "set MINDIE_TEST_DCMI_CAPTURE for full-capture replay")
 class FullDcmiCaptureReplayTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:

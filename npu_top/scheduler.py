@@ -227,14 +227,15 @@ class AdaptiveScheduler:
                     failed_at = int(time.time())
                     persist_failure = failed_at - self._latest_failure_event.get(server["id"], 0) >= self.settings.history_interval
                     duration_ms = exc.duration_ms if isinstance(exc, _ProbeFailure) else None
+                    error_message = str(exc)
                     storage = self._record_observation(lambda: self.db.record_failure(
-                        server["id"], str(exc), duration_ms, persist_failure))
+                        server["id"], error_message, duration_ms, persist_failure))
                     if persist_failure and storage["state"] == "recorded":
                         self._latest_failure_event[server["id"]] = failed_at
                     with self._condition:
                         self._snapshots[server["id"]] = {
                             "server_id": server["id"], "collected_at": int(time.time()),
-                            "status": "offline", "error": str(exc)[-1200:],
+                            "status": "offline", "error": error_message[-1200:],
                             "probe_duration_ms": duration_ms,
                             "recording": storage,
                         }

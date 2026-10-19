@@ -90,17 +90,18 @@ Register `npu-top` in `.mcp.json`:
 }
 ```
 
-This exposes 5 read-only MCP tools:
+This exposes 6 read-only MCP tools:
 
 | MCP Tool | Arguments | When to Use It |
 | --- | --- | --- |
 | `list_npu_servers()` | *(none)* | Get a quick overview of all monitored servers and their idle/busy card counts |
-| `find_npu_capacity(...)` | `min_idle_npus?`, `max_age_seconds?`, `tags?`, `include_disabled?` | Shortlist candidate servers with enough idle NPUs and matching tags (low-priority hosts are ranked last) |
+| `find_npu_capacity(...)` | `min_idle_npus?`, `max_age_seconds?`, `tags?`, `include_disabled?`, `min_weight_mount_avail_gb?`, `prefer_same_package?`, `exclude_throttled?` | Shortlist candidate servers with enough idle NPUs, free weight-mount space, same-package topology preference, and thermal/power throttle filtering (low-priority hosts are ranked last) |
 | `npu_status(...)` | `host`, `mode?`, `include_processes?`, `process_details?`, `max_age_seconds?` | Inspect per-card AICore utilization, HBM usage, and owning processes on a host |
 | `server_status(...)` | `host`, `mode?`, `process_details?`, `timeout_seconds?` | Inspect full host health: NPUs, CPU, RAM, disks, Docker containers, and process owners |
 | `list_mounts(...)` | `host`, `mode?`, `timeout_seconds?` | Check filesystem mounts and free capacity to find where model weights live |
+| `npu_telemetry_window(...)` | `host`, `devices`, `start_ts`, `end_ts` | Summarize in-memory ring-buffer NPU telemetry (HBM, utilization, thermal/power throttle flags, and coverage status, `allocation_authority: false`) for explicit devices over `[start_ts, end_ts]` |
 
-> **Recommended Workflow**: Use `mode="cache"` for fast initial screening, run `mode="live"` on your chosen candidate for a final pre-flight check, and then submit your workload through `mindie-coordinator`.
+> **Recommended Workflow**: Use `mode="cache"` for fast initial screening, run `mode="live"` on your chosen candidate for a final pre-flight check, submit your workload through `mindie-coordinator`, and query `npu_telemetry_window` afterward to attach bounded hardware telemetry to run manifests.
 
 ---
 
@@ -114,6 +115,7 @@ GET /api/agent/npu?host=192.0.2.21&mode=cache
 GET /api/agent/npu?host=192.0.2.21&mode=live&processes=1&details=1
 GET /api/agent/server?host=192.0.2.21&mode=cache
 GET /api/agent/capacity?min_idle_npus=4&max_age_seconds=180&tags=A3
+GET /api/agent/telemetry-window?host=192.0.2.21&devices=0,1&start_ts=1756450000&end_ts=1756450060
 ```
 
-`host` matches the server IP, display name, remote `hostname`, or internal ID (if multiple SSH endpoints share the same IP, an explicit ambiguity error is returned instead of guessing). *Note: `192.0.2.x` addresses above are RFC 5737 documentation examples.*
+`host` matches the server IP, display name, remote `hostname`, or internal ID (if multiple SSH endpoints share the same IP, an explicit ambiguity error is returned instead of guessing). `/api/agent/telemetry-window` requires `host`, comma-separated integer `devices`, and finite Unix timestamps `start_ts` / `end_ts`. *Note: `192.0.2.x` addresses above are RFC 5737 documentation examples.*
