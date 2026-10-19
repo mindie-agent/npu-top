@@ -9,26 +9,12 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - uses: astral-sh/setup-uv@v5
-      - run: npm ci --no-audit --no-fund
-      - run: npm run build
-      - run: uv build
-      - name: Confirm frontend assets are in the wheel
-        run: unzip -l dist/*.whl | grep static | head
-      - name: Publish GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" dist/*.whl dist/*.tar.gz \
-            --title "$GITHUB_REF_NAME" \
-            --notes "Install the wheel (includes the built frontend). Source installs from git require Node.js 22.13+."
+    uses: mindie-agent/mindie-bench/.github/workflows/publish-release.yml@1cc96070a82425b2a9303402bcc52c9265284277
+    with:
+      setup-command: uv venv --python 3.13 && uv pip install -r pyproject.toml pytest
+      node: true
+      build-command: |
+        npm ci --no-audit --no-fund
+        npm run build
+        uv build --out-dir "$RELEASE_ASSETS_DIR"
+        unzip -l "$RELEASE_ASSETS_DIR"/*.whl | grep -F 'npu_top/static/index.html'
