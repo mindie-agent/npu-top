@@ -47,6 +47,9 @@ class AdaptiveScheduler:
         self._collecting = False
         self._manual: set[str] = set()
         self._force_infrastructure: set[str] = set()
+        self._request_generation = 0
+        self._completed_requests: dict[str, int] = {}
+        self._infrastructure_results: dict[str, tuple[int, dict[str, Any]]] = {}
         self._fatal_error: str | None = None
         self._maintenance_error: dict | None = None
 
@@ -97,7 +100,8 @@ class AdaptiveScheduler:
     ) -> dict[str, Any]:
         deadline = time.monotonic() + max(1, min(float(timeout), 60))
         with self._condition:
-            previous = self._snapshots.get(server_id)
+            self._request_generation += 1
+            requested_generation = self._request_generation
             self._manual.add(server_id)
             if force_infrastructure:
                 self._force_infrastructure.add(server_id)
@@ -105,8 +109,13 @@ class AdaptiveScheduler:
             while not self._stop.is_set():
                 if self._fatal_error is not None:
                     raise RuntimeError("collector failed; inspect diagnostics before restarting")
-                current = self._snapshots.get(server_id)
-                if current is not None and current is not previous:
+                if force_infrastructure:
+                    completed_generation, current = self._infrastructure_results.get(
+                        server_id, (0, None))
+                else:
+                    completed_generation = self._completed_requests.get(server_id, 0)
+                    current = self._snapshots.get(server_id)
+                if current is not None and completed_generation >= requested_generation:
                     return dict(current)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -181,10 +190,11 @@ class AdaptiveScheduler:
                 self._manual.clear()
                 force_infrastructure = set(self._force_infrastructure)
                 self._force_infrastructure.clear()
+                request_generation = self._request_generation
                 self._collecting = True
             started = time.monotonic()
             try:
-                self._collect_cycle(targets, force_infrastructure)
+                self._collect_cycle(targets, force_infrastructure, request_generation=request_generation)
             finally:
                 with self._condition:
                     self._collecting = False
@@ -203,8 +213,14 @@ class AdaptiveScheduler:
                                                "sqlite_errorcode": getattr(exc, "sqlite_errorcode", None)}
                 prune_at = time.monotonic() + 3600
 
-    def _collect_cycle(self, targets: set[str], force_infrastructure: set[str] | None = None) -> None:
+    def _collect_cycle(self, targets: set[str], force_infrastructure: set[str] | None = None,
+                       *, request_generation: int | None = None) -> None:
         force_infrastructure = force_infrastructure or set()
+        # A probe already in flight when a request arrives cannot acknowledge
+        # that request. Capture the generation with the cycle's requested work.
+        if request_generation is None:
+            with self._condition:
+                request_generation = self._request_generation
         servers = [server for server in self.db.list_servers() if server["enabled"]]
         if targets and "*" not in targets:
             servers = [server for server in servers if server["id"] in targets]
@@ -240,6 +256,10 @@ class AdaptiveScheduler:
                             "probe_duration_ms": duration_ms,
                             "recording": storage,
                         }
+                        self._completed_requests[server["id"]] = request_generation
+                        if include_infra:
+                            self._infrastructure_results[server["id"]] = (
+                                request_generation, self._snapshots[server["id"]])
                         self._condition.notify_all()
                     continue
                 if include_infra:
@@ -253,6 +273,11 @@ class AdaptiveScheduler:
                 snapshot["recording"] = {**storage, "history_requested": persist}
                 with self._condition:
                     self._snapshots[server["id"]] = snapshot
+                    self._completed_requests[server["id"]] = request_generation
+                    if include_infra:
+                        # Retain the satisfying result if another ordinary
+                        # cycle publishes before a live waiter reacquires.
+                        self._infrastructure_results[server["id"]] = (request_generation, snapshot)
                     self._condition.notify_all()
 
     @staticmethod
