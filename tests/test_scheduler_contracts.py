@@ -116,6 +116,8 @@ def test_live_request_does_not_accept_an_older_inflight_ordinary_probe(scheduled
     scheduler, _ = scheduled
     probe = GatedProbe()
     scheduler.probe = probe
+    # Establish the initial infrastructure sample independently of host uptime.
+    scheduler.collect_now("one", force_infrastructure=True)
     scheduler.start()
     assert scheduler._condition.waiting.wait(2)
     scheduler.collect_now("one")
