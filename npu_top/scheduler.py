@@ -165,14 +165,15 @@ class AdaptiveScheduler:
                 self._condition.notify_all()
 
     def _run_loop(self) -> None:
-        next_cycle = 0.0
+        last_cycle_finished = None
         prune_at = 0.0
         while not self._stop.is_set():
             with self._condition:
                 interval = self.effective_interval()
                 now = time.monotonic()
                 manual = bool(self._manual)
-                wait_for = max(0.0, next_cycle - now)
+                wait_for = (max(0.0, last_cycle_finished + interval - now)
+                            if last_cycle_finished is not None else 0.0)
                 if not manual and wait_for > 0:
                     self._condition.wait(timeout=min(wait_for, 5.0))
                     continue
@@ -189,7 +190,7 @@ class AdaptiveScheduler:
                     self._collecting = False
                     self._last_cycle_at = int(time.time())
                     self._cycle_duration_ms = round((time.monotonic() - started) * 1000)
-                next_cycle = time.monotonic() + self.effective_interval()
+                last_cycle_finished = time.monotonic()
             if time.monotonic() >= prune_at:
                 try:
                     self.db.prune(self.settings.retention_days)
