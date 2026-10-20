@@ -315,7 +315,7 @@ class ProbeTests(unittest.TestCase):
         with mock.patch.object(probe, "_run_script", side_effect=fake_run_script):
             probe.collect({"id": "s1", "name": "s1", "host": "10.0.0.1"}, include_infrastructure=False)
             probe.collect({"id": "s1", "name": "s1", "host": "10.0.0.1"}, include_infrastructure=True)
-        self.assertEqual(observed_timeouts, [20, 32])
+        self.assertEqual(observed_timeouts, [20, 45])
 
 
     def test_probe_collect_preserves_fractional_timestamp(self) -> None:

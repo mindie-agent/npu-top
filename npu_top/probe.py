@@ -2,7 +2,7 @@
 
 [Role] Executes bounded remote shell probes over SSH and parses raw sections into structured host snapshots.
 [Invariants] Observation-only; `npu_info_rc` gates NPU health while optional `usages`/Docker/process-detail failures degrade gracefully without hiding NPU errors.
-[Timeouts & Locks] Remote `npu-smi` commands use inner `timeout 8`; outer SSH timeout is `max(ssh_timeout + 12, 32)` when infrastructure is included (`>= sum(inner_budgets) + grace`). The optional `-t common` frequency pass has an 8 s inner budget, per-card `timeout 2`, a 3 s cleanup grace, and outer `budget + 2 + 3` (never a `min` that truncates the inner budget); a killed pass keeps any complete card sections already printed. The optional DCMI pass is one bounded `python3 -` helper (8 s) and is skipped with a structured status when the configured SSH timeout is smaller.
+[Timeouts & Locks] Remote `npu-smi` commands use inner `timeout 8` and Docker commands use `timeout 5`/`timeout 10`; outer SSH timeout is `max(ssh_timeout + 25, 45)` when infrastructure is included (`>= sum(inner_budgets) + grace`). The optional `-t common` frequency pass has an 8 s inner budget, per-card `timeout 2`, a 3 s cleanup grace, and outer `budget + 2 + 3` (never a `min` that truncates the inner budget); a killed pass keeps any complete card sections already printed. The optional DCMI pass is one bounded `python3 -` helper (8 s) and is skipped with a structured status when the configured SSH timeout is smaller.
 [Side-Effect Policy] Read-only remote SSH probes (`/proc`, `df`, `findmnt`, `docker ps/stats/info`, `npu-smi info`, `npu-smi info -t common`, DCMI `dcmi_init` + `dcmi_get_device_info`); never mutates remote host state or submits NPU work.
 """
 from __future__ import annotations
@@ -44,9 +44,9 @@ printf '__NFM_SECTION__npu_usages\n'; timeout 8 npu-smi info -t usages 2>&1
 INFRA_SCRIPT = r'''set +e
 printf '__NFM_SECTION__disk\n'; df -P -B1 -x tmpfs -x devtmpfs -x overlay 2>/dev/null
 printf '__NFM_SECTION__mounts\n'; if command -v findmnt >/dev/null 2>&1; then findmnt -J -o TARGET,SOURCE,FSTYPE,OPTIONS 2>/dev/null; else cat /proc/mounts 2>/dev/null; fi
-printf '__NFM_SECTION__docker\n'; if command -v docker >/dev/null 2>&1; then docker ps --no-trunc --format '{{json .}}' 2>&1; else printf 'unavailable\n'; fi
+printf '__NFM_SECTION__docker\n'; if command -v docker >/dev/null 2>&1; then timeout 5 docker ps --no-trunc --format '{{json .}}' 2>&1; else printf 'unavailable\n'; fi
 printf '__NFM_SECTION__docker_stats\n'; if command -v docker >/dev/null 2>&1; then timeout 10 docker stats --no-stream --format '{{json .}}' 2>/dev/null; fi
-printf '__NFM_SECTION__docker_info\n'; if command -v docker >/dev/null 2>&1; then docker info --format '{{json .}}' 2>/dev/null; fi
+printf '__NFM_SECTION__docker_info\n'; if command -v docker >/dev/null 2>&1; then timeout 5 docker info --format '{{json .}}' 2>/dev/null; fi
 '''
 
 FREQUENCY_BUDGET_SECONDS = 8
@@ -424,7 +424,7 @@ class HostProbe:
         """Bound the remote getter before the SSH deadline (no remote file write)."""
         result = subprocess.run(
             [*self.adapter.ssh_base(server), "timeout", "--signal=TERM", "--kill-after=1",
-             str(timeout - 3), "python3", "-", *args],
+             str(max(1, timeout - 3)), "python3", "-", *args],
             input=source.replace("\r\n", "\n").encode("utf-8"),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=timeout, check=False, cwd=self.adapter.project_root,
@@ -632,7 +632,7 @@ class HostProbe:
         # driver/runtime versions. Their non-zero status must not replace the
         # explicit npu_info_rc health gate above.
         script = FAST_SCRIPT + (INFRA_SCRIPT if include_infrastructure else "") + "\nexit 0\n"
-        effective_timeout = max(self.timeout + 12, 32) if include_infrastructure else self.timeout
+        effective_timeout = max(self.timeout + 25, 45) if include_infrastructure else self.timeout
         try:
             result = self._run_script(server, script, effective_timeout)
         except subprocess.TimeoutExpired as exc:
