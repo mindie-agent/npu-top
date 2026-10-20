@@ -1,49 +1,15 @@
 """Live non-destructive NPU probe tests against real Ascend A2 and A3 hosts."""
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
 
 import pytest
 
-from npu_top import npu_smi
 from npu_top.agent_view import npu_status, server_status
-from npu_top.probe import HostProbe
-
-
-class LiveDefaultSshAdapter:
-    """Read-only SSH adapter using invoking user's default SSH keys with ControlMaster=no."""
-
-    def __init__(self, working_dir: Path) -> None:
-        self.project_root = working_dir
-
-    def preflight(self, server: dict[str, Any]) -> dict[str, Any]:
-        return {"ok": True, "category": "ssh_config_valid", "error": None}
-
-    def ssh_base(self, server: dict[str, Any], *, batch_mode: bool = True) -> list[str]:
-        return [
-            "ssh",
-            "-T",
-            "-o",
-            "ControlMaster=no",
-            "-o",
-            f"BatchMode={'yes' if batch_mode else 'no'}",
-            "-o",
-            "ConnectTimeout=5",
-            "-p",
-            str(server.get("port", 22)),
-            f"{server.get('username', 'root')}@{server['host']}",
-        ]
-
-    def parse_npu(self, info: str, usages: str) -> dict[str, Any]:
-        return npu_smi.parse_npu(info, usages)
 
 
 @pytest.mark.live_npu
-def test_live_a2_173_125_1_2_probe(tmp_path: Path) -> None:
-    probe = HostProbe(LiveDefaultSshAdapter(tmp_path), timeout=8)
-    server = {"id": "a2-2", "name": "a2-173-125-1-2", "host": "173.125.1.2", "port": 22, "username": "root", "enabled": True, "tags": ["a2"]}
-    snapshot = probe.collect(server, include_infrastructure=True)
+def test_live_a2_173_125_1_2_probe(standing_npu_snapshots) -> None:
+    server, snapshot = standing_npu_snapshots['173.125.1.2']
     assert snapshot["summary"]["npu_count"] == 8
     assert snapshot["summary"]["hbm_total_mb"] == 8 * 32768
     for idx, dev in enumerate(snapshot["devices"]):
@@ -57,10 +23,8 @@ def test_live_a2_173_125_1_2_probe(tmp_path: Path) -> None:
 
 
 @pytest.mark.live_npu
-def test_live_a3_192_168_13_165_idle_probe(tmp_path: Path) -> None:
-    probe = HostProbe(LiveDefaultSshAdapter(tmp_path), timeout=8)
-    server = {"id": "a3-165", "name": "a3-192-168-13-165", "host": "192.168.13.165", "port": 22, "username": "root", "enabled": True, "tags": ["a3"]}
-    snapshot = probe.collect(server, include_infrastructure=True)
+def test_live_a3_192_168_13_165_idle_probe(standing_npu_snapshots) -> None:
+    server, snapshot = standing_npu_snapshots['192.168.13.165']
     assert snapshot["summary"]["npu_count"] == 8
     assert snapshot["summary"]["hbm_total_mb"] == 8 * 131072
     for idx, dev in enumerate(snapshot["devices"]):
@@ -76,10 +40,8 @@ def test_live_a3_192_168_13_165_idle_probe(tmp_path: Path) -> None:
 
 
 @pytest.mark.live_npu
-def test_live_a3_192_168_13_154_probe(tmp_path: Path) -> None:
-    probe = HostProbe(LiveDefaultSshAdapter(tmp_path), timeout=8)
-    server = {"id": "a3-154", "name": "a3-192-168-13-154", "host": "192.168.13.154", "port": 22, "username": "root", "enabled": True, "tags": ["a3"]}
-    snapshot = probe.collect(server, include_infrastructure=True)
+def test_live_a3_192_168_13_154_probe(standing_npu_snapshots) -> None:
+    server, snapshot = standing_npu_snapshots['192.168.13.154']
     assert snapshot["summary"]["npu_count"] == 8
     assert snapshot["summary"]["hbm_total_mb"] == 8 * 131072
     for idx, dev in enumerate(snapshot["devices"]):

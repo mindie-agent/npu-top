@@ -1,4 +1,4 @@
-"""Stdio MCP server exposing `npu-top` observation tools (`npu_status`, `server_status`, `list_mounts`, `find_npu_capacity`, `list_npu_servers`).
+"""Stdio MCP server exposing `npu-top` observation tools (`npu_status`, `server_status`, `list_mounts`, `find_npu_capacity`, `npu_telemetry_window`, `list_npu_servers`).
 
 [Role] Translates JSON-RPC 2.0 MCP tool calls into loopback HTTP requests via `VawsTopClient`.
 [Invariants] All tools are read-only (`readOnlyHint=True`) and declare the observation-only contract.
@@ -13,7 +13,10 @@ from typing import Any
 
 from . import __version__
 from .observability import observed, capture_failure
-from .client import ClientError, VawsTopClient, format_capacity, format_mounts, format_npu, format_server, format_servers
+from .client import (
+    ClientError, VawsTopClient, format_capacity, format_mounts, format_npu, format_server,
+    format_servers, format_telemetry_window,
+)
 
 
 LEGACY_VERSION = "2025-11-25"
@@ -87,7 +90,45 @@ TOOLS = [
                 "max_age_seconds": {"type": "integer", "minimum": 0, "maximum": 86400, "default": 300},
                 "tags": {"type": "array", "items": {"type": "string"}, "default": []},
                 "include_disabled": {"type": "boolean", "default": False},
+                "min_weight_mount_avail_gb": {
+                    "type": "number", "minimum": 0, "default": 0.0,
+                    "description": "Minimum available GB on a weight-candidate mount",
+                },
+                "prefer_same_package": {
+                    "type": "boolean", "default": True,
+                    "description": "Prefer A3 dual-die pairs sharing a physical package",
+                },
+                "exclude_throttled": {
+                    "type": "boolean", "default": True,
+                    "description": "Exclude hosts whose observed thermal health is throttled",
+                },
             },
+            "additionalProperties": False,
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "npu_telemetry_window",
+        "title": "Task-window NPU telemetry (observed)",
+        "description": "Export raw per-device aicore p50/p95, HBM peak, temperature/power maxima, frequency minimum, coverage, explicit throttling state, and measurement limitations for a bounded historical window." + CONTRACT_NOTE,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "host": {"type": "string", "description": "Server IP, hostname, display name, or id"},
+                "devices": {
+                    "type": "array", "items": {"type": "integer", "minimum": 0},
+                    "minItems": 1, "maxItems": 256,
+                },
+                "start_ts": {
+                    "oneOf": [{"type": "number"}, {"type": "string"}],
+                    "description": "Unix seconds; fractional numbers or decimal strings preserve subsecond window bounds",
+                },
+                "end_ts": {
+                    "oneOf": [{"type": "number"}, {"type": "string"}],
+                    "description": "Unix seconds; fractional numbers or decimal strings preserve subsecond window bounds",
+                },
+            },
+            "required": ["host", "devices", "start_ts", "end_ts"],
             "additionalProperties": False,
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -152,8 +193,32 @@ def handle_request(request: dict[str, Any], client: VawsTopClient) -> dict[str, 
                 payload = client.capacity(
                     arguments.get("min_idle_npus", 1), arguments.get("max_age_seconds", 300),
                     arguments.get("tags") or [], bool(arguments.get("include_disabled")),
+                    min_weight_mount_avail_gb=float(arguments.get("min_weight_mount_avail_gb", 0.0)),
+                    prefer_same_package=bool(arguments.get("prefer_same_package", True)),
+                    exclude_throttled=bool(arguments.get("exclude_throttled", True)),
                 )
                 result = _result(format_capacity(payload), payload, modern)
+            elif params.get("name") == "npu_telemetry_window":
+                host = arguments.get("host")
+                if not isinstance(host, str) or not host.strip():
+                    raise ClientError("host is required")
+                devices = arguments.get("devices")
+                if (
+                    not isinstance(devices, list) or not devices
+                    or any(isinstance(device, bool) or not isinstance(device, int) or device < 0 for device in devices)
+                ):
+                    raise ClientError("devices must be a non-empty array of non-negative integers")
+                start_ts = arguments.get("start_ts")
+                end_ts = arguments.get("end_ts")
+                if (
+                    isinstance(start_ts, bool) or isinstance(end_ts, bool)
+                    or not isinstance(start_ts, (int, float, str))
+                    or not isinstance(end_ts, (int, float, str))
+                    or not str(start_ts).strip() or not str(end_ts).strip()
+                ):
+                    raise ClientError("start_ts and end_ts must be finite Unix seconds")
+                payload = client.telemetry_window(host, devices, start_ts, end_ts)
+                result = _result(format_telemetry_window(payload), payload, modern)
             elif params.get("name") in ("server_status", "list_mounts"):
                 host = arguments.get("host")
                 if not isinstance(host, str) or not host.strip():

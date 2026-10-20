@@ -1,7 +1,7 @@
 """Environment-driven configuration for `npu-top`.
 
-[Role] Parses and validates `NFM_*` environment variables into an immutable `Settings` dataclass.
-[Invariants] Rejects malformed or out-of-range explicit settings with `ValueError` instead of silently falling back to defaults.
+[Role] Parses and validates primary `MINDIE_TOP_*` environment variables (legacy `NFM_*` aliases remain accepted) into an immutable `Settings` dataclass.
+[Invariants] `MINDIE_TOP_*` takes precedence over `NFM_*`; malformed or out-of-range explicit settings raise `ValueError` instead of silently falling back to defaults.
 [Timeouts & Locks] Default `ssh_timeout=20s` exceeds inner `timeout 8` `npu-smi` commands; zero locks.
 [Side-Effect Policy] `prepare()` creates `state_dir`, `keys`, and `ssh-control` directories (`0o700`).
 """
@@ -12,10 +12,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-def _number(name: str, default: int, minimum: int) -> int:
-    raw = os.environ.get(name)
+def _env(primary: str, legacy: str | None = None) -> str | None:
+    """Return the primary name when it is set, otherwise the legacy alias."""
+    if primary in os.environ:
+        return os.environ[primary]
+    if legacy is not None and legacy in os.environ:
+        return os.environ[legacy]
+    return None
+
+
+def _number(primary: str, default: int, minimum: int, legacy: str | None = None) -> int:
+    raw = _env(primary, legacy)
     if raw is None:
         return default
+    name = primary if primary in os.environ else legacy or primary
     try:
         value = int(raw)
     except ValueError as exc:
@@ -25,9 +35,9 @@ def _number(name: str, default: int, minimum: int) -> int:
     return value
 
 
-def _paths(name: str) -> tuple[Path, ...]:
+def _paths(primary: str, legacy: str | None = None) -> tuple[Path, ...]:
     """Parse an ``os.pathsep``-separated list of file paths from the environment."""
-    raw = os.environ.get(name, "")
+    raw = _env(primary, legacy) or ""
     return tuple(
         Path(item).expanduser()
         for item in raw.split(os.pathsep)
@@ -59,23 +69,26 @@ class Settings:
 
     @classmethod
     def load(cls) -> "Settings":
-        state_dir = Path(os.environ.get("NFM_STATE_DIR", Path.cwd() / "data")).expanduser().resolve()
-        bootstrap_command = os.environ.get("NFM_BOOTSTRAP_COMMAND", "").strip() or None
+        raw_state_dir = _env("MINDIE_TOP_STATE_DIR", "NFM_STATE_DIR")
+        state_dir = Path(raw_state_dir or Path.cwd() / "data").expanduser().resolve()
+        bootstrap_command = (_env("MINDIE_TOP_BOOTSTRAP_COMMAND", "NFM_BOOTSTRAP_COMMAND") or "").strip() or None
         return cls(
             project_root=state_dir,
             state_dir=state_dir,
-            bind=os.environ.get("NFM_BIND", "127.0.0.1"),
-            port=_number("NFM_PORT", 8788, 1),
-            idle_interval=_number("NFM_IDLE_INTERVAL_SECONDS", 120, 10),
-            history_interval=_number("NFM_HISTORY_INTERVAL_SECONDS", 30, 5),
-            infrastructure_interval=_number("NFM_INFRA_INTERVAL_SECONDS", 60, 15),
-            retention_days=_number("NFM_RETENTION_DAYS", 90, 1),
-            max_workers=_number("NFM_MAX_WORKERS", 8, 1),
-            ssh_timeout=_number("NFM_SSH_TIMEOUT_SECONDS", 20, 2),
-            sqlite_max_mb=_number("NFM_SQLITE_MAX_MB", 1024, 16),
-            hbm_busy_threshold_mb=_number("NFM_HBM_BUSY_THRESHOLD_MB", 8192, 1),
-            inventory_files=_paths("NFM_INVENTORY_FILES"),
-            host_pool_files=_paths("NFM_HOST_POOL_FILES"),
+            bind=_env("MINDIE_TOP_BIND", "NFM_BIND") or "127.0.0.1",
+            port=_number("MINDIE_TOP_PORT", 8788, 1, "NFM_PORT"),
+            idle_interval=_number("MINDIE_TOP_IDLE_INTERVAL_SECONDS", 120, 10, "NFM_IDLE_INTERVAL_SECONDS"),
+            history_interval=_number("MINDIE_TOP_HISTORY_INTERVAL_SECONDS", 30, 5, "NFM_HISTORY_INTERVAL_SECONDS"),
+            infrastructure_interval=_number("MINDIE_TOP_INFRA_INTERVAL_SECONDS", 60, 15, "NFM_INFRA_INTERVAL_SECONDS"),
+            retention_days=_number("MINDIE_TOP_RETENTION_DAYS", 90, 1, "NFM_RETENTION_DAYS"),
+            max_workers=_number("MINDIE_TOP_MAX_WORKERS", 8, 1, "NFM_MAX_WORKERS"),
+            ssh_timeout=_number("MINDIE_TOP_SSH_TIMEOUT_SECONDS", 20, 2, "NFM_SSH_TIMEOUT_SECONDS"),
+            sqlite_max_mb=_number("MINDIE_TOP_SQLITE_MAX_MB", 1024, 16, "NFM_SQLITE_MAX_MB"),
+            hbm_busy_threshold_mb=_number(
+                "MINDIE_TOP_HBM_BUSY_THRESHOLD_MB", 8192, 1, "NFM_HBM_BUSY_THRESHOLD_MB",
+            ),
+            inventory_files=_paths("MINDIE_TOP_INVENTORY_FILES", "NFM_INVENTORY_FILES"),
+            host_pool_files=_paths("MINDIE_TOP_HOST_POOL_FILES", "NFM_HOST_POOL_FILES"),
             bootstrap_command=bootstrap_command,
         )
 

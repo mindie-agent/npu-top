@@ -90,17 +90,18 @@ npu-top capacity --min-idle 4 --max-age 180 --tag A3
 }
 ```
 
-挂载后，AI 助手会获得 5 个只读工具：
+挂载后，AI 助手会获得 6 个只读工具：
 
 | MCP 工具名 | 参数 | 适用场景 |
 | --- | --- | --- |
 | `list_npu_servers()` | 无 | 一眼看完当前监控了哪些服务器、各有多少张空卡 |
-| `find_npu_capacity(...)` | `min_idle_npus?`, `max_age_seconds?`, `tags?`, `include_disabled?` | 按所需空闲卡数和硬件标签（如 `A3`）快速挑出候选服务器（低优先级机器自动排最后） |
+| `find_npu_capacity(...)` | `min_idle_npus?`, `max_age_seconds?`, `tags?`, `include_disabled?`, `min_weight_mount_avail_gb?`, `prefer_same_package?`, `exclude_throttled?` | 按所需空闲卡数、挂载盘可用空间、同 Package 拓扑与降频剔除条件快速挑出候选服务器（低优先级机器自动排最后） |
 | `npu_status(...)` | `host`, `mode?`, `include_processes?`, `process_details?`, `max_age_seconds?` | 查看指定服务器上每张卡的利用率、HBM 显存和是谁占着卡 |
 | `server_status(...)` | `host`, `mode?`, `process_details?`, `timeout_seconds?` | 查看指定服务器的 CPU、内存、磁盘、Docker 容器和占用人详情 |
 | `list_mounts(...)` | `host`, `mode?`, `timeout_seconds?` | 查看指定服务器的所有磁盘挂载点容量，并找出适合放模型权重的目录 |
+| `npu_telemetry_window(...)` | `host`, `devices`, `start_ts`, `end_ts` | 按显式 Unix 时间窗口 `[start_ts, end_ts]` 与设备 ID 列表汇总指定主机内存环形缓冲区中的 NPU 遥测数据（HBM、利用率、温控/功耗降频标记与观测覆盖率，`allocation_authority: false`） |
 
-> **推荐配合方式**：先用 `mode="cache"` 从内存里快速初筛出候选机器，选定目标后再用 `mode="live"` 做最后一次实时确认，然后交给 `mindie-coordinator` 申请用卡。
+> **推荐配合方式**：先用 `mode="cache"` 从内存里快速初筛出候选机器，选定目标后再用 `mode="live"` 做最后一次实时确认，然后交给 `mindie-coordinator` 申请用卡；基准测试或压测收尾后可调用 `npu_telemetry_window` 导出测试时间窗内的硬件遥测摘要。
 
 ---
 
@@ -114,6 +115,7 @@ GET /api/agent/npu?host=192.0.2.21&mode=cache
 GET /api/agent/npu?host=192.0.2.21&mode=live&processes=1&details=1
 GET /api/agent/server?host=192.0.2.21&mode=cache
 GET /api/agent/capacity?min_idle_npus=4&max_age_seconds=180&tags=A3
+GET /api/agent/telemetry-window?host=192.0.2.21&devices=0,1&start_ts=1756450000&end_ts=1756450060
 ```
 
-其中 `host` 可以传服务器 IP、显示别名、远端 `hostname` 或内部 ID（如果同一个 IP 配了多个不同端口的 SSH 端点，接口会明确报错提示歧义，不会瞎猜）。*注：文档中的 `192.0.2.x` 为 RFC 5737 示例地址。*
+其中 `host` 可以传服务器 IP、显示别名、远端 `hostname` 或内部 ID（如果同一个 IP 配了多个不同端口的 SSH 端点，接口会明确报错提示歧义，不会瞎猜）；`/api/agent/telemetry-window` 要求显式传入 `host`、逗号分隔的整数 `devices` 以及有限 Unix 时间戳 `start_ts` / `end_ts`。*注：文档中的 `192.0.2.x` 为 RFC 5737 示例地址。*

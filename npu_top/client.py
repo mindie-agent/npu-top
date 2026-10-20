@@ -79,10 +79,26 @@ class VawsTopClient:
     def capacity(
         self, min_idle_npus: int = 1, max_age_seconds: int = 300,
         tags: list[str] | None = None, include_disabled: bool = False,
+        *, min_weight_mount_avail_gb: float = 0.0, prefer_same_package: bool = True,
+        exclude_throttled: bool = True,
     ) -> dict[str, Any]:
         return self._get("/api/agent/capacity", {
             "min_idle_npus": str(min_idle_npus), "max_age_seconds": str(max_age_seconds),
             "tags": ",".join(tags or []), "include_disabled": "1" if include_disabled else "0",
+            "min_weight_mount_avail_gb": f"{float(min_weight_mount_avail_gb):g}",
+            "prefer_same_package": "1" if prefer_same_package else "0",
+            "exclude_throttled": "1" if exclude_throttled else "0",
+        })
+
+    def telemetry_window(
+        self, host: str, devices: list[int], start_ts: int | float | str,
+        end_ts: int | float | str,
+    ) -> dict[str, Any]:
+        return self._get("/api/agent/telemetry-window", {
+            "host": host,
+            "devices": ",".join(str(device) for device in devices),
+            "start_ts": str(start_ts),
+            "end_ts": str(end_ts),
         })
 
 
@@ -201,9 +217,49 @@ def format_mounts(payload: dict[str, Any]) -> str:
 def format_capacity(payload: dict[str, Any]) -> str:
     rows = []
     for server in payload.get("candidates") or []:
+        pairs = server.get("IdlePackagePairs") or []
+        thermal = server.get("ThermalHealth") or "unknown"
+        mount_gb = server.get("MaxWeightMountAvailGb")
         rows.append(
             f"{server['host']} idle={server['idle_npu_count']}/{server['npu_count']} "
             f"age={server['age_seconds']}s cpu={_number(server.get('cpu_percent'))} "
-            f"mem={_number(server.get('memory_percent'))} tags={','.join(server.get('tags') or []) or '-'}"
+            f"mem={_number(server.get('memory_percent'))} tags={','.join(server.get('tags') or []) or '-'} "
+            f"thermal={thermal} pairs={pairs or '-'} "
+            f"weight_mount={'?' if mount_gb is None else f'{float(mount_gb):.1f}G'}"
         )
     return "\n".join(rows) or "no matching capacity"
+
+
+def format_telemetry_window(payload: dict[str, Any]) -> str:
+    window = payload.get("window") or {}
+    throttling = payload.get("throttling_detected")
+    throttle_text = "unknown" if throttling is None else ("detected" if throttling else "none-observed")
+    interference = payload.get("resource_interference_detected")
+    interference_text = "unknown" if interference is None else ("detected" if interference else "none-observed")
+    sources = ",".join(window.get("timestamp_sources") or []) or "-"
+    lines = [
+        f"{payload['server']['host']} telemetry {window.get('start_ts')}..{window.get('end_ts')} "
+        f"coverage={_number(payload.get('coverage_ratio'), '')} "
+        f"interval={_number(window.get('sample_interval_seconds'), 's')} "
+        f"sources={sources} throttling={throttle_text} "
+        f"resource_interference={interference_text} raw_samples={window.get('raw_sample_count', 0)}"
+    ]
+    for device in payload.get("devices") or []:
+        device_throttle = device.get("throttling_detected")
+        device_throttle_text = "null" if device_throttle is None else str(device_throttle).lower()
+        device_interference = device.get("resource_interference_detected")
+        device_interference_text = "null" if device_interference is None else str(device_interference).lower()
+        lines.append(
+            f"{device.get('npu_id')} n={device.get('sample_count', 0)} "
+            f"cov={_number(device.get('coverage_ratio'), '')} "
+            f"aicore_p50={_number(device.get('aicore_p50'), '%')} "
+            f"aicore_p95={_number(device.get('aicore_p95'), '%')} "
+            f"hbm_peak={_number(device.get('hbm_peak_mb'), 'M')} "
+            f"temp_max={_number(device.get('temp_max_c'), 'C')} "
+            f"power_max={_number(device.get('power_max_w'), 'W')} "
+            f"freq_min={_number(device.get('freq_mhz_min'), 'MHz')} "
+            f"throttling={device_throttle_text} interference={device_interference_text}"
+        )
+    for limitation in payload.get("measurement_limitations") or []:
+        lines.append(f"limitation: {limitation}")
+    return "\n".join(lines)

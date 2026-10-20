@@ -2,8 +2,8 @@
 
 [Role] Executes bounded remote shell probes over SSH and parses raw sections into structured host snapshots.
 [Invariants] Observation-only; `npu_info_rc` gates NPU health while optional `usages`/Docker/process-detail failures degrade gracefully without hiding NPU errors.
-[Timeouts & Locks] Remote `npu-smi` commands use inner `timeout 8`; outer SSH timeout is `max(ssh_timeout + 12, 32)` when infrastructure is included (`>= sum(inner_budgets) + grace`).
-[Side-Effect Policy] Read-only remote SSH probes (`/proc`, `df`, `findmnt`, `docker ps/stats/info`, `npu-smi info`); never mutates remote host state.
+[Timeouts & Locks] Remote `npu-smi` commands use inner `timeout 8`; outer SSH timeout is `max(ssh_timeout + 12, 32)` when infrastructure is included (`>= sum(inner_budgets) + grace`). The optional `-t common` frequency pass has an 8 s inner budget, per-card `timeout 2`, a 3 s cleanup grace, and outer `budget + 2 + 3` (never a `min` that truncates the inner budget); a killed pass keeps any complete card sections already printed. The optional DCMI pass is one bounded `python3 -` helper (8 s) and is skipped with a structured status when the configured SSH timeout is smaller.
+[Side-Effect Policy] Read-only remote SSH probes (`/proc`, `df`, `findmnt`, `docker ps/stats/info`, `npu-smi info`, `npu-smi info -t common`, DCMI `dcmi_init` + `dcmi_get_device_info`); never mutates remote host state or submits NPU work.
 """
 from __future__ import annotations
 
@@ -12,9 +12,12 @@ import json
 import re
 import subprocess
 import time
+from pathlib import Path
 from typing import Any
 
+from . import dcmi_telemetry
 from .device_adapter import DeviceAdapter
+from .npu_smi import parse_npu_common
 
 
 SECTION = "__NFM_SECTION__"
@@ -44,6 +47,27 @@ printf '__NFM_SECTION__mounts\n'; if command -v findmnt >/dev/null 2>&1; then fi
 printf '__NFM_SECTION__docker\n'; if command -v docker >/dev/null 2>&1; then docker ps --no-trunc --format '{{json .}}' 2>&1; else printf 'unavailable\n'; fi
 printf '__NFM_SECTION__docker_stats\n'; if command -v docker >/dev/null 2>&1; then timeout 10 docker stats --no-stream --format '{{json .}}' 2>/dev/null; fi
 printf '__NFM_SECTION__docker_info\n'; if command -v docker >/dev/null 2>&1; then docker info --format '{{json .}}' 2>/dev/null; fi
+'''
+
+FREQUENCY_BUDGET_SECONDS = 8
+FREQUENCY_CARD_TIMEOUT_SECONDS = 2
+FREQUENCY_CLEANUP_GRACE_SECONDS = 3
+FREQUENCY_OUTER_TIMEOUT_SECONDS = (
+    FREQUENCY_BUDGET_SECONDS + FREQUENCY_CARD_TIMEOUT_SECONDS + FREQUENCY_CLEANUP_GRACE_SECONDS
+)
+DCMI_TIMEOUT_SECONDS = 8
+FREQUENCY_SCRIPT = r'''set +e
+nfm_start=$SECONDS
+nfm_rc_all=0
+for nfm_card in __NFM_CARDS__; do
+    if [ $((SECONDS - nfm_start)) -ge __NFM_BUDGET__ ]; then break; fi
+    printf '__NFM_SECTION__common_%s\n' "$nfm_card"
+    timeout __NFM_CARD_TIMEOUT__ npu-smi info -t common -i "$nfm_card" 2>&1
+    nfm_rc=$?
+    printf '__NFM_SECTION__common_rc_%s\n%s\n' "$nfm_card" "$nfm_rc"
+    if [ "$nfm_rc" -ne 0 ]; then nfm_rc_all=$nfm_rc; fi
+done
+exit "$nfm_rc_all"
 '''
 
 PROCESS_DETAIL_SCRIPT = r'''set +e
@@ -223,6 +247,41 @@ def build_process_detail_script(pids: list[int]) -> str:
     return PROCESS_DETAIL_SCRIPT.replace("__NFM_PIDS__", safe_pids) + "\nexit 0\n"
 
 
+def build_frequency_script(
+    npu_ids: list[int], budget_seconds: int = FREQUENCY_BUDGET_SECONDS,
+) -> str:
+    """Build a bounded `-t common` query for validated integer card ids.
+
+    The script keeps each card's exit code in a `common_rc_<card>` section and
+    exits nonzero if any card failed, so a read-only sampling failure cannot be
+    hidden by a trailing `exit 0`.
+    """
+    cards = sorted({int(npu_id) for npu_id in npu_ids
+                    if not isinstance(npu_id, bool) and isinstance(npu_id, int) and npu_id >= 0})
+    if not cards:
+        return ""
+    budget = max(1, int(budget_seconds))
+    return (
+        FREQUENCY_SCRIPT
+        .replace("__NFM_CARDS__", " ".join(str(card) for card in cards))
+        .replace("__NFM_BUDGET__", str(budget))
+        .replace("__NFM_CARD_TIMEOUT__", str(FREQUENCY_CARD_TIMEOUT_SECONDS))
+    )
+
+
+def frequency_probe_plan(configured_timeout: int) -> tuple[int, int] | None:
+    """Return `(inner_budget, outer_timeout)` with outer >= budget + card + grace.
+
+    The optional pass is skipped when the configured SSH timeout cannot cover
+    one card plus cleanup; the outer timeout never truncates the inner budget.
+    """
+    available = int(configured_timeout) - FREQUENCY_CARD_TIMEOUT_SECONDS - FREQUENCY_CLEANUP_GRACE_SECONDS
+    if available < 1:
+        return None
+    budget = min(FREQUENCY_BUDGET_SECONDS, available)
+    return budget, budget + FREQUENCY_CARD_TIMEOUT_SECONDS + FREQUENCY_CLEANUP_GRACE_SECONDS
+
+
 def _decode_process_field(value: str) -> str | None:
     if not value:
         return None
@@ -359,6 +418,23 @@ class HostProbe:
             result.stderr.decode("utf-8", errors="replace"),
         )
 
+    def _run_python(
+        self, server: dict[str, Any], source: str, args: list[str], timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        """Bound the remote getter before the SSH deadline (no remote file write)."""
+        result = subprocess.run(
+            [*self.adapter.ssh_base(server), "timeout", "--signal=TERM", "--kill-after=1",
+             str(timeout - 3), "python3", "-", *args],
+            input=source.replace("\r\n", "\n").encode("utf-8"),
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=timeout, check=False, cwd=self.adapter.project_root,
+        )
+        return subprocess.CompletedProcess(
+            result.args, result.returncode,
+            result.stdout.decode("utf-8", errors="replace"),
+            result.stderr.decode("utf-8", errors="replace"),
+        )
+
     def _collect_process_details(self, server: dict[str, Any], pids: list[int]) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
         if not pids:
             return {}, {"state": "unchanged"}
@@ -378,6 +454,172 @@ class HostProbe:
             detail["details_observed_at"] = observed_at
         # A process can exit between the device sample and /proc lookup.
         return details, {"state": "observed", "observed_at": observed_at}
+
+    @staticmethod
+    def _parse_frequency_sections(output: str) -> dict[int, dict[str, Any]]:
+        parsed: dict[int, dict[str, Any]] = {}
+        for name, text in split_sections(output).items():
+            if not name.startswith("common_"):
+                continue
+            try:
+                int(name.split("_", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            parsed.update(parse_npu_common(text))
+        return parsed
+
+    @staticmethod
+    def _parse_frequency_exit_codes(output: str) -> dict[str, int]:
+        codes: dict[str, int] = {}
+        for name, text in split_sections(output).items():
+            if not name.startswith("common_rc_"):
+                continue
+            try:
+                card = int(name[len("common_rc_"):])
+            except ValueError:
+                continue
+            lines = text.strip().splitlines()
+            if not lines:
+                continue
+            try:
+                codes[str(card)] = int(lines[0].strip())
+            except ValueError:
+                continue
+        return codes
+
+    @staticmethod
+    def _frequency_status(
+        cards: list[int], parsed: dict[int, dict[str, Any]], state: str, **extra: Any,
+    ) -> dict[str, Any]:
+        exit_codes = {str(key): int(value) for key, value in (extra.get("card_exit_codes") or {}).items()}
+        observed = [card for card in cards
+                    if exit_codes.get(str(card)) == 0
+                    and (parsed.get(card) or {}).get("freq_mhz") is not None]
+        missing = [card for card in cards if card not in observed]
+        failed = sorted({int(card) for card, code in exit_codes.items() if code != 0}
+                        | {int(card) for card in (extra.get("failed_cards") or [])})
+        if state == "observed" and (not observed or missing or failed or extra.get("exit_code")):
+            state = "partial" if observed else "unavailable"
+        elif state == "partial" and not observed:
+            state = "unavailable"
+        return {
+            "state": state, "stage": "npu_frequency",
+            "observed_at": int(time.time()), "cards": cards,
+            "observed_cards": observed, "missing_cards": missing,
+            **extra, "failed_cards": failed, "card_exit_codes": exit_codes,
+        }
+
+    def _collect_npu_frequency(
+        self, server: dict[str, Any], npu_ids: list[int],
+    ) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
+        """Read current AICore frequency from the optional card-scoped `-t common` pass.
+
+        Frequency is supplementary telemetry: a timeout, SSH error, or driver
+        that does not support `-t common` leaves the register absent instead of
+        failing the main NPU health probe or falling back to the rated clock.
+        A killed SSH call still contributes any complete sections already printed.
+        """
+        cards = sorted({int(npu_id) for npu_id in npu_ids
+                        if not isinstance(npu_id, bool) and isinstance(npu_id, int) and npu_id >= 0})
+        if not cards:
+            return {}, {"state": "not_applicable"}
+        plan = frequency_probe_plan(self.timeout)
+        if plan is None:
+            return {}, {
+                "state": "unavailable", "stage": "npu_frequency",
+                "error_type": "ConfiguredTimeoutTooSmall",
+                "configured_timeout": self.timeout,
+                "required_timeout": FREQUENCY_CARD_TIMEOUT_SECONDS + FREQUENCY_CLEANUP_GRACE_SECONDS + 1,
+                "cards": cards, "observed_cards": [], "missing_cards": cards,
+                "failed_cards": [], "card_exit_codes": {},
+            }
+        budget, outer_timeout = plan
+        script = build_frequency_script(cards, budget)
+        try:
+            result = self._run_script(server, script, outer_timeout)
+        except subprocess.TimeoutExpired as exc:
+            output = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            parsed = self._parse_frequency_sections(output)
+            return parsed, self._frequency_status(
+                cards, parsed, "partial" if parsed else "unavailable",
+                error_type=type(exc).__name__, timed_out=True,
+                card_exit_codes=self._parse_frequency_exit_codes(output),
+            )
+        except OSError as exc:
+            return {}, {"state": "unavailable", "stage": "npu_frequency",
+                        "error_type": type(exc).__name__}
+        parsed = self._parse_frequency_sections(result.stdout)
+        exit_codes = self._parse_frequency_exit_codes(result.stdout)
+        if not parsed:
+            return {}, {
+                "state": "unavailable", "stage": "npu_frequency",
+                "exit_code": result.returncode, "card_exit_codes": exit_codes,
+                "error": (result.stderr or result.stdout or "frequency query returned no common section")[-800:],
+            }
+        extra: dict[str, Any] = {"card_exit_codes": exit_codes}
+        if result.returncode != 0:
+            extra["exit_code"] = result.returncode
+            extra["error"] = (result.stderr or "frequency probe exited nonzero")[-800:]
+        return parsed, self._frequency_status(
+            cards, parsed, "observed" if result.returncode == 0 else "partial", **extra,
+        )
+
+    def _collect_dcmi(
+        self, server: dict[str, Any], npu_ids: list[int],
+    ) -> dict[str, Any]:
+        """Read the DCMI AICORE_FREQREDUC_CAUSE mask without failing the main probe.
+
+        The helper is a separate stdlib-only module sent over SSH stdin; it runs
+        on the NPU host where `libdcmi.so` lives. A missing python3/library, a
+        timeout, or a malformed reply degrades to an explicit unavailable block
+        with null decoded fields.
+        """
+        cards = sorted({int(npu_id) for npu_id in npu_ids
+                        if not isinstance(npu_id, bool) and isinstance(npu_id, int) and npu_id >= 0})
+        if not cards:
+            return {"state": "not_applicable", "stage": "dcmi"}
+        if self.timeout < DCMI_TIMEOUT_SECONDS:
+            return {
+                "state": "unavailable", "stage": "dcmi",
+                "error_type": "ConfiguredTimeoutTooSmall",
+                "configured_timeout": self.timeout,
+                "required_timeout": DCMI_TIMEOUT_SECONDS,
+            }
+        try:
+            source = Path(dcmi_telemetry.__file__).read_text(encoding="utf-8")
+        except OSError as exc:
+            return {"state": "unavailable", "stage": "dcmi",
+                    "error_type": type(exc).__name__, "error": str(exc)[-800:]}
+        try:
+            result = self._run_python(
+                server, source,
+                ["--cards", ",".join(str(card) for card in cards), "--device", "0"],
+                DCMI_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return {"state": "unavailable", "stage": "dcmi",
+                    "error_type": type(exc).__name__, "timed_out": True}
+        except OSError as exc:
+            return {"state": "unavailable", "stage": "dcmi",
+                    "error_type": type(exc).__name__, "error": str(exc)[-800:]}
+        if result.returncode != 0:
+            return {
+                "state": "unavailable", "stage": "dcmi",
+                "exit_code": result.returncode,
+                "error": (result.stderr or "DCMI helper failed")[-800:],
+            }
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            return {"state": "unavailable", "stage": "dcmi",
+                    "error_type": type(exc).__name__,
+                    "error": (result.stdout or result.stderr or "invalid DCMI JSON")[-800:]}
+        if not isinstance(payload, dict):
+            return {"state": "unavailable", "stage": "dcmi",
+                    "error_type": "InvalidPayload", "error": "DCMI helper returned non-object JSON"}
+        payload["stage"] = "dcmi"
+        payload.setdefault("observed_at", int(time.time()))
+        return payload
 
     def collect(self, server: dict[str, Any], include_infrastructure: bool) -> dict[str, Any]:
         started = time.monotonic()
@@ -412,8 +654,30 @@ class HostProbe:
         memory = parse_meminfo(sections.get("meminfo", ""))
         npu = self.adapter.parse_npu(sections.get("npu_info", ""), sections.get("npu_usages", ""))
         devices = npu.get("devices", [])
+        frequencies, frequency_status = self._collect_npu_frequency(
+            server, [device["npu_id"] for device in devices],
+        )
         for device in devices:
+            frequency = frequencies.get(int(device["npu_id"])) or {}
+            exit_code = (frequency_status.get("card_exit_codes") or {}).get(str(device["npu_id"]))
+            # A partial command may print register-shaped text before failing.
+            # Only a completed card read contributes values to stored telemetry.
+            if exit_code == 0:
+                if frequency.get("freq_mhz") is not None:
+                    device["freq_mhz"] = frequency["freq_mhz"]
+                if frequency.get("freq_max_mhz") is not None:
+                    device["freq_max_mhz"] = frequency["freq_max_mhz"]
+                if frequency.get("chips"):
+                    device["frequency_chips"] = frequency["chips"]
+            if exit_code is not None:
+                device["frequency_exit_code"] = exit_code
             device["busy"] = is_device_busy(device, self.hbm_busy_threshold_mb)
+        dcmi_status = self._collect_dcmi(server, [device["npu_id"] for device in devices])
+        dcmi_cards = dcmi_status.get("cards") or {}
+        for device in devices:
+            card_status = dcmi_cards.get(str(device["npu_id"]))
+            if card_status is not None:
+                device["dcmi_freq_reduc"] = card_status
 
         if include_infrastructure:
             infrastructure = {
@@ -457,11 +721,17 @@ class HostProbe:
             "disk_max_percent": max((disk["used_percent"] for disk in disks), default=None),
         }
         duration_ms = round((time.monotonic() - started) * 1000)
+        collected_at_ns = time.time_ns()
         return {
-            "server_id": server_id, "collected_at": int(time.time()), "duration_ms": duration_ms,
+            "server_id": server_id,
+            "collected_at": collected_at_ns / 1_000_000_000,
+            "collected_at_ns": collected_at_ns,
+            "duration_ms": duration_ms,
             "hostname": sections.get("hostname") or server["name"], "summary": summary,
             "devices": devices, **infrastructure,
             "process_details": detail_status,
+            "frequency_probe": frequency_status,
+            "dcmi": dcmi_status,
         }
 
 

@@ -1,9 +1,9 @@
-"""Command-line entry point for `npu-top` (`serve`, `mcp`, `diagnostics`, `servers`, `npu`, `status`, `mounts`, `capacity`).
+"""Command-line entry point for `npu-top` (`serve`, `mcp`, `diagnostics`, `inventory`, `servers`, `npu`, `status`, `mounts`, `capacity`).
 
-[Role] Parses CLI flags and dispatches to local HTTP server, stdio MCP server, diagnostics exporter, or `VawsTopClient`.
-[Invariants] Observation-only; exits `3` when `--max-age` is exceeded and `2` when the loopback monitor is unreachable.
-[Timeouts & Locks] Passes `--timeout` (`default 30s`) to `VawsTopClient` for live probes.
-[Side-Effect Policy] Loopback HTTP queries (or server launch on `serve`).
+[Role] Parses CLI flags and dispatches to local HTTP server, stdio MCP server, diagnostics exporter, machine-inventory bridge, or `VawsTopClient`.
+[Invariants] Observation-only; exits `3` when `--max-age` is exceeded and `2` when the loopback monitor or inventory bridge fails. `inventory sync` writes only the explicitly selected machines.json.
+[Timeouts & Locks] Passes `--timeout` (`default 30s`) to `VawsTopClient` for live probes and cached inventory reads.
+[Side-Effect Policy] Loopback HTTP queries, explicit machine-inventory/DB writes on `inventory sync`, or server launch on `serve`.
 """
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 from . import __version__
 from .observability import observed, capture_failure
@@ -39,6 +40,27 @@ def parser() -> argparse.ArgumentParser:
     sub.add_parser("mcp", help="stdio MCP server")
     diagnostics = sub.add_parser("diagnostics", help="local diagnostic export and configured reporting")
     diagnostics.add_argument("arguments", nargs=argparse.REMAINDER)
+    inventory = sub.add_parser("inventory", help="bridge coordinator machine inventory and npu-top observations")
+    inventory_commands = inventory.add_subparsers(dest="inventory_command", required=True)
+    inventory_sync = inventory_commands.add_parser(
+        "sync", help="read coordinator machines or write observed hardware/tags/weight mounts back",
+    )
+    inventory_sync.add_argument(
+        "--from-coordinator", action="store_true",
+        help="register machines.json hosts in npu-top's local server registry",
+    )
+    inventory_sync.add_argument(
+        "--to-coordinator", action="store_true",
+        help="merge cached npu-top hardware/tags/weight mounts into machines.json atomically",
+    )
+    inventory_sync.add_argument(
+        "--machines", type=Path,
+        help=(
+            "explicit machines.json path (default: MINDIE_COORDINATOR_STATE_DIR or first "
+            "MINDIE_TOP_INVENTORY_FILES/NFM_INVENTORY_FILES entry)"
+        ),
+    )
+    inventory_sync.add_argument("--timeout", type=int, default=30)
     sub.add_parser("servers", help="list monitored servers")
     npu = sub.add_parser("npu", help="show cached NPU status by IP, hostname, name, or server id")
     npu.add_argument("host")
@@ -65,7 +87,75 @@ def parser() -> argparse.ArgumentParser:
     capacity.add_argument("--max-age", type=int, default=300)
     capacity.add_argument("--tag", action="append", default=[])
     capacity.add_argument("--include-disabled", action="store_true")
+    capacity.add_argument("--min-weight-mount-avail-gb", type=float, default=0.0)
+    capacity.add_argument("--no-prefer-same-package", action="store_true")
+    capacity.add_argument("--include-throttled", action="store_true")
     return result
+
+
+def _machines_path(explicit: Path | None) -> Path:
+    if explicit is not None:
+        return explicit.expanduser()
+    coordinator_dir = os.environ.get("MINDIE_COORDINATOR_STATE_DIR", "").strip()
+    if coordinator_dir:
+        return Path(coordinator_dir).expanduser() / "machines.json"
+    from .settings import Settings
+    settings = Settings.load()
+    if settings.inventory_files:
+        return settings.inventory_files[0]
+    raise ValueError(
+        "inventory sync requires --machines PATH or an existing "
+        "MINDIE_COORDINATOR_STATE_DIR / MINDIE_TOP_INVENTORY_FILES / NFM_INVENTORY_FILES configuration"
+    )
+
+
+def _inventory_sync(args: argparse.Namespace) -> dict:
+    if not args.from_coordinator and not args.to_coordinator:
+        raise ValueError("inventory sync requires --from-coordinator and/or --to-coordinator")
+    from .inventory_bridge import import_from_coordinator, sync_to_coordinator
+    path = _machines_path(args.machines)
+    result: dict = {"machines_file": str(path)}
+    if args.from_coordinator:
+        from .db import Database
+        from .settings import Settings
+        settings = Settings.load()
+        settings.prepare()
+        db = Database(settings.state_dir / "monitor.sqlite3", settings.sqlite_max_mb * 1024 * 1024)
+        db.initialize()
+        try:
+            result["from_coordinator"] = import_from_coordinator(path, db)
+        finally:
+            db.close()
+    if args.to_coordinator:
+        client = VawsTopClient(args.url)
+        servers = (client.servers().get("servers") or [])
+        snapshots = {
+            server["id"]: client.server(
+                server["host"], mode="cache", include_processes=False,
+                detailed_processes=False, timeout=args.timeout,
+            )
+            for server in servers
+        }
+        result["to_coordinator"] = sync_to_coordinator(path, servers, snapshots)
+    return result
+
+
+def _format_inventory(result: dict) -> str:
+    rows = [f"machines={result['machines_file']}"]
+    source = result.get("from_coordinator")
+    if source:
+        rows.append(
+            f"from-coordinator machines={source['machines']} registered={source['registered']} "
+            f"updated={source['updated']} unchanged={source['unchanged']}"
+        )
+    target = result.get("to_coordinator")
+    if target:
+        rows.append(
+            f"to-coordinator observations={target['observations']} matched={target['matched']} "
+            f"added={target['added']} hardware={target['hardware']} tags={target['tags']} "
+            f"mounts={target['mounts']}"
+        )
+    return "\n".join(rows)
 
 
 @observed("top.cli")
@@ -79,9 +169,14 @@ def main(argv: list[str] | None = None) -> int:
         from mindie_diagnostics.cli import main as diagnostics_main
         return diagnostics_main(args.arguments)
     if args.command == "serve":
+        # Explicit CLI flags must beat ambient primary and legacy environment
+        # settings. `Settings.load()` gives MINDIE_TOP_* precedence, so setting
+        # both names keeps the historical NFM_* contract visible as well.
         if args.bind:
+            os.environ["MINDIE_TOP_BIND"] = args.bind
             os.environ["NFM_BIND"] = args.bind
         if args.port is not None:
+            os.environ["MINDIE_TOP_PORT"] = str(args.port)
             os.environ["NFM_PORT"] = str(args.port)
         from .static_files import require_static
         from .serve import main as serve_main
@@ -91,6 +186,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "mcp":
         from .mcp import main as mcp_main
         return mcp_main()
+    if args.command == "inventory":
+        try:
+            payload = _inventory_sync(args)
+        except (ClientError, OSError, ValueError) as exc:
+            capture_failure(exc, "inventory_sync_failed")
+            print(str(exc), file=sys.stderr)
+            return 2
+        print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) if args.json else _format_inventory(payload))
+        return 0
     try:
         client = VawsTopClient(args.url)
         if args.command == "servers":
@@ -117,7 +221,12 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 output = format_server(payload) if args.command == "status" else format_mounts(payload)
         else:
-            payload = client.capacity(args.min_idle, args.max_age, args.tag, args.include_disabled)
+            payload = client.capacity(
+                args.min_idle, args.max_age, args.tag, args.include_disabled,
+                min_weight_mount_avail_gb=args.min_weight_mount_avail_gb,
+                prefer_same_package=not args.no_prefer_same_package,
+                exclude_throttled=not args.include_throttled,
+            )
             output = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) if args.json else format_capacity(payload)
         print(output)
         return 0
