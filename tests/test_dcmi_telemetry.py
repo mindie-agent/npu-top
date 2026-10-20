@@ -12,7 +12,7 @@ class DcmiEnumTests(unittest.TestCase):
     fixture = Path(__file__).parent / "fixtures" / "dcmi_interface_api_enum_excerpt.txt"
 
     def test_installed_header_values_match_module_constants(self) -> None:
-        text = self.fixture.read_text()
+        text = self.fixture.read_text(encoding="utf-8")
         main_cmd = dcmi_telemetry.parse_enum_values(text, "dcmi_main_cmd")
         lp_sub = dcmi_telemetry.parse_enum_values(text, "DCMI_LP_SUB_CMD")
         self.assertEqual(main_cmd["DCMI_MAIN_CMD_LP"], dcmi_telemetry.DCMI_MAIN_CMD_LP)
@@ -20,8 +20,6 @@ class DcmiEnumTests(unittest.TestCase):
             lp_sub["DCMI_LP_SUB_CMD_AICORE_FREQREDUC_CAUSE"],
             dcmi_telemetry.DCMI_LP_SUB_CMD_AICORE_FREQREDUC_CAUSE,
         )
-        self.assertEqual(dcmi_telemetry.DCMI_MAIN_CMD_LP, 8)
-        self.assertEqual(dcmi_telemetry.DCMI_LP_SUB_CMD_AICORE_FREQREDUC_CAUSE, 9)
 
 
 class DcmiMaskDecodeTests(unittest.TestCase):

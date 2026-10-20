@@ -139,8 +139,9 @@ class InventoryBridgeTests(unittest.TestCase):
             path = Path(root) / "machines.json"
             path.write_text(json.dumps(machine_document()), encoding="utf-8")
             os.chmod(path, 0o640)
+            original_mode = path.stat().st_mode & 0o777
             write_machines(path, machine_document())
-            self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+            self.assertEqual(path.stat().st_mode & 0o777, original_mode)
             self.assertEqual(read_machines(path), machine_document())
 
     def test_observed_record_derives_c1_hardware_tags_and_weight_mounts(self) -> None:
