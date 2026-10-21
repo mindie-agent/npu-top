@@ -81,10 +81,13 @@ for nfm_pid in __NFM_PIDS__; do
     nfm_name="$(cat "/proc/$nfm_pid/comm" 2>/dev/null)"
     nfm_cmdline="$(tr '\000' ' ' < "/proc/$nfm_pid/cmdline" 2>/dev/null)"
     nfm_cgroup="$(cat "/proc/$nfm_pid/cgroup" 2>/dev/null)"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    nfm_state="$(awk '/^State:/ {print $2}' "/proc/$nfm_pid/status" 2>/dev/null)"
+    nfm_wchan="$(tr -d '\n' < "/proc/$nfm_pid/wchan" 2>/dev/null)"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$nfm_pid" "$(nfm_b64 "$nfm_user")" "$(nfm_b64 "$nfm_cwd")" \
         "$(nfm_b64 "$nfm_cmdline")" "$(nfm_b64 "$nfm_exe")" \
-        "$(nfm_b64 "$nfm_name")" "$(nfm_b64 "$nfm_cgroup")"
+        "$(nfm_b64 "$nfm_name")" "$(nfm_b64 "$nfm_cgroup")" \
+        "$(nfm_b64 "$nfm_state")" "$(nfm_b64 "$nfm_wchan")"
 done
 '''
 
@@ -318,13 +321,24 @@ def extract_ownership_labels(cwd: str | None, container_name: str | None) -> lis
     return list(labels.values())
 
 
+_DISK_WAIT_WCHAN_TOKENS = ("lock_page", "folio_wait", "nfs_", "ceph_", "blk_mq", "io_schedule", "wait_on_page")
+
+
+def _is_disk_io_wait(proc_state: str | None, wchan: str | None) -> bool:
+    st = str(proc_state or "").strip().upper()
+    wc = str(wchan or "").strip().lower()
+    return st == "D" or any(tok in wc for tok in _DISK_WAIT_WCHAN_TOKENS)
+
+
 def parse_process_details(text: str) -> dict[int, dict[str, Any]]:
     details: dict[int, dict[str, Any]] = {}
     for line in text.splitlines():
         cells = line.split("\t")
-        if len(cells) != 7 or not cells[0].isdigit():
+        if len(cells) not in (7, 9) or not cells[0].isdigit():
             continue
-        user, cwd, command, executable, name, cgroup = (_decode_process_field(value) for value in cells[1:])
+        user, cwd, command, executable, name, cgroup = (_decode_process_field(value) for value in cells[1:7])
+        proc_state = _decode_process_field(cells[7]) if len(cells) >= 9 else None
+        wchan = _decode_process_field(cells[8]) if len(cells) >= 9 else None
         pid = int(cells[0])
         details[pid] = {
             "pid": pid,
@@ -334,6 +348,9 @@ def parse_process_details(text: str) -> dict[int, dict[str, Any]]:
             "command": command,
             "executable": executable,
             "container_id": extract_container_id(cgroup),
+            "proc_state": proc_state,
+            "wchan": wchan,
+            "disk_io_wait": _is_disk_io_wait(proc_state, wchan),
         }
     return details
 
@@ -376,6 +393,9 @@ def attach_process_details(
                 "cwd": detail.get("cwd"),
                 "command": detail.get("command"),
                 "executable": detail.get("executable"),
+                "proc_state": detail.get("proc_state"),
+                "wchan": detail.get("wchan"),
+                "disk_io_wait": bool(detail.get("disk_io_wait")),
                 "details_observed_at": detail.get("details_observed_at"),
                 "container": container,
                 "ownership_labels": extract_ownership_labels(

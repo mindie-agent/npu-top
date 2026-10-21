@@ -119,6 +119,20 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(process["command"], "python -m vllm.entrypoints.openai.api_server")
         self.assertEqual(process["container"]["name"], "worker-01")
         self.assertEqual(process["npu_memory_mb"], 2048)
+        self.assertFalse(process["disk_io_wait"])
+
+        # 9-column format with D-state and lock_page_killable wchan
+        d_details = parse_process_details("\t".join([
+            "422", encoded("root"), encoded("/workspace"), encoded("vllm serve"),
+            encoded("/usr/bin/python3"), encoded("python3"), encoded(f"0::/system.slice/docker-{container_id}.scope"),
+            encoded("D"), encoded("lock_page_killable"),
+        ]))
+        d_devices = [{"processes": [{"pid": 422, "npu_process_name": "python3", "npu_memory_mb": 16384}]}]
+        attach_process_details(d_devices, d_details, {"containers": []})
+        d_proc = d_devices[0]["processes"][0]
+        self.assertEqual(d_proc["proc_state"], "D")
+        self.assertEqual(d_proc["wchan"], "lock_page_killable")
+        self.assertTrue(d_proc["disk_io_wait"])
 
     def test_process_detail_script_only_contains_validated_pids(self) -> None:
         script = build_process_detail_script([23, 7, 23, -1])
