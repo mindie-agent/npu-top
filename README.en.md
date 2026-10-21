@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/mindie-agent/mindie-agent/main/assets/brand/mindie-agent-logo.png" alt="MindIE Agent logo" width="128" height="128">
+</p>
+
 <h1 align="center">MindIE Agent NPU Top (<code>npu-top</code>)</h1>
 
 <p align="center">
@@ -184,6 +188,17 @@ npu-top status 192.0.2.21
 # List mount points and highlight candidate model-weight storage paths
 npu-top mounts 192.0.2.21 --live
 ```
+
+---
+
+## Fault Isolation & History Retention
+
+To stay reliable across shared multi-host Ascend fleets, `npu-top` isolates partial probe failures and bounds local disk growth automatically:
+
+- **Unreachable Hosts Never Block the Fleet View**: If a server fails SSH authentication or times out, `npu-top` marks that specific host as `error` with actionable diagnostic details while keeping all other hosts live in the dashboard and CLI/MCP responses.
+- **Graceful Degradation on Partial Container Lookups (`container_lookups_degraded`)**: If `docker ps`/`docker inspect` or process-detail enrichment times out on a busy host, `npu-top` preserves the valid `npu-smi` card utilization and HBM metrics and flags `container_lookups_degraded` rather than dropping the card telemetry or presenting stale process details as fresh.
+- **Automatic 90-Day SQLite History Pruning**: Historical summaries and heatmaps are automatically pruned to a rolling 90-day window (`NFM_RETENTION_DAYS=90`) within the hard `1024 MB` SQLite size cap (`NFM_SQLITE_MAX_MB=1024`). If an existing SQLite file is corrupted, `npu-top` preserves the file for inspection and surfaces an explicit error instead of silently wiping it.
+- **Safe Inventory & SSH Key Bootstrap Boundaries**: Missing or malformed explicit inventory files (`NFM_INVENTORY_FILES`) fail fast on startup. During SSH public-key onboarding, `npu-top` distinguishes not-started, completed, and uncertain (`unknown`) remote writes without blindly re-sending commands, and passwords are never written to receipts or logs.
 
 ---
 

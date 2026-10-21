@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/mindie-agent/mindie-agent/main/assets/brand/mindie-agent-logo.png" alt="MindIE Agent logo" width="128" height="128">
+</p>
+
 <h1 align="center">MindIE Agent NPU Top (<code>npu-top</code>)</h1>
 
 <p align="center">
@@ -189,11 +193,14 @@ npu-top mounts 192.0.2.21 --live
 
 ---
 
-## 错误与数据保留
+## 错误隔离与历史数据保留
 
-显式配置的 inventory 缺失、损坏或含无效记录会阻止初始化；后台导入失败保留诊断，不能当作空清单。已有数据库损坏时保留文件并报错。进程详情刷新失败保留有效 NPU 观测，但不会把旧详情标为本次确认。
+为了保证在几十台服务器混布的生产环境里长期稳定运行，`npu-top` 对探测异常与历史存储做了严格的故障隔离与容量控制：
 
-SSH 公钥安装区分尚未开始、已完成与结果不确定；断连后的未知写入需要先核对远端结果，重复添加机器不会自动重发。密码不写入回执。
+- **单机故障隔离，绝不连累全局看板**：当某台昇腾服务器 SSH 超时、断网或不可达时，`npu-top` 会将该主机标记为 `error` 并附带具体诊断信息，同时其余在线机器的实时采样与看板展示照常运行。
+- **容器与进程归属降级不丢卡指标（`container_lookups_degraded`）**：如果宿主机上 Docker 响应超时或部分容器 PID 映射失败，采集器仍会完整保留已拿到的 `npu-smi` 算力与 HBM 显存指标，仅在状态中显式标注 `container_lookups_degraded`（绝不把过期的进程详情冒充为本次最新结果）。
+- **90 天历史数据自动滚动清理**：本地 SQLite 数据库按 90 天窗口（`NFM_RETENTION_DAYS=90`）与 `1024 MB` 体积上限（`NFM_SQLITE_MAX_MB=1024`）自动淘汰最旧的历史聚点与热力图数据；若发现已有数据库文件损坏，会保留原文件现场并直接报错，绝不静默清空。
+- **清单校验与免密引导安全边界**：显式配置的机器清单（`NFM_INVENTORY_FILES`）若缺失或格式损坏会直接报错阻止启动；首次批量免密安装 SSH 公钥时严格区分“未开始”、“已完成”与“断连后结果不确定（`unknown`）”，且密码仅走内存管道、绝不写入回执或日志。
 
 ## 配置参数一览
 
