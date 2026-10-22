@@ -209,7 +209,7 @@ class InventoryBridgeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "machines.json"
             path.write_text(json.dumps(machine_document()), encoding="utf-8")
-            env = {"NFM_STATE_DIR": str(Path(root) / "state")}
+            env = {"MINDIE_TOP_STATE_DIR": str(Path(root) / "state")}
             output = io.StringIO()
             with mock.patch.dict(os.environ, env, clear=False), redirect_stdout(output):
                 code = CLI.main([

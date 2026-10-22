@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Offline migration: retain the old DB until the operator verifies the service."""
+"""Offline migration: retain the old DB until the operator verifies the service.
+
+[Role] Converts legacy `host_samples` rows into bounded 15-minute rollups in a staging SQLite database, then swaps it into place after verification.
+[Invariants] No legacy owner-marker file is created or consulted; an existing staging file or backup aborts; sample counts and integrity checks must agree before the swap.
+[Timeouts & Locks] Single-process offline migration with a `5.0s` SQLite connect timeout and `PRAGMA busy_timeout=5000`; the caller must stop all service processes.
+[Side-Effect Policy] Writes staging/backup SQLite files, removes legacy WAL sidecars, and atomically replaces the database path with `os.replace`; zero network I/O.
+"""
 import argparse
 import json
 import os
@@ -18,10 +24,11 @@ def main():
     path = args.database.resolve()
     pending = path.with_name(path.name + '.rollup-building')
     backup = path.with_name(path.name + '.legacy')
-    if pending.exists() or pending.with_name(pending.name + '.owner').exists() or backup.exists():
+    if pending.exists() or backup.exists():
         raise SystemExit('Migration staging/backup exists; inspect before retrying')
     # The caller must stop all service processes first.
-    source = sqlite3.connect(path.as_uri() + '?mode=rw', uri=True)
+    source = sqlite3.connect(path.as_uri() + '?mode=rw', uri=True, timeout=5.0)
+    source.execute('PRAGMA busy_timeout=5000')
     source.row_factory = sqlite3.Row
     if not source.execute("SELECT 1 FROM sqlite_master WHERE name='host_samples'").fetchone():
         raise SystemExit('Already migrated; no action needed')
@@ -65,9 +72,8 @@ def main():
             sidecar.unlink()
     with pending.open('rb') as handle:
         os.fsync(handle.fileno())
-    path.rename(backup)
-    pending.rename(path)
-    dest.marker.replace(path.with_name(path.name + '.owner'))
+    os.replace(path, backup)
+    os.replace(pending, path)
     print(json.dumps(dict(status='migrated',samples=done,old_bytes=backup.stat().st_size,new_bytes=path.stat().st_size,rollback=str(backup))), flush=True)
 
 if __name__ == '__main__':

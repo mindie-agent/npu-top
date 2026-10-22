@@ -28,6 +28,8 @@ class InventoryError(ValueError):
 def _read_source(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
+    except TimeoutError:
+        raise
     except (OSError, UnicodeError) as exc:
         raise InventoryError(f"inventory source unavailable: {path} ({type(exc).__name__})") from exc
 
@@ -144,7 +146,7 @@ class ExternalKeyBootstrap:
 
     PLACEHOLDERS = ("host", "port", "user", "public_key_file", "python")
 
-    def __init__(self, template: str, *, timeout: int | None = None) -> None:
+    def __init__(self, template: str, *, timeout: int | None = 30) -> None:
         self.argv_template = shlex.split(template)
         if not self.argv_template:
             raise ValueError("bootstrap command must not be empty")
@@ -170,7 +172,7 @@ class ExternalKeyBootstrap:
                 command, input=password + "\n", stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, timeout=self.timeout, check=False,
             )
-        except subprocess.TimeoutExpired:
+        except (subprocess.TimeoutExpired, TimeoutError):
             return KeyInstallResult("unknown", "密钥引导超过调用者时限；远端写入结果不确定，请先核对")
         except OSError as exc:
             return KeyInstallResult("not_started", f"无法执行密钥引导命令: {type(exc).__name__}")

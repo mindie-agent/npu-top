@@ -247,6 +247,8 @@ def run_probe(
         raw = Path(header_path).read_bytes()
         header_text = raw.decode("utf-8", errors="replace")
         header_sha256 = hashlib.sha256(raw).hexdigest()
+    except TimeoutError:
+        raise
     except OSError as exc:
         header_error = f"{type(exc).__name__}: {exc}"
     main_cmd, lp_sub, enum_source, enum_error = resolve_enum_values(header_text)
@@ -285,6 +287,8 @@ def run_probe(
         ]
         lib.dcmi_get_device_info.restype = ctypes.c_int
         init_ret = int(lib.dcmi_init())
+    except TimeoutError:
+        raise
     except (OSError, AttributeError) as exc:
         records = {
             str(card): _unavailable_record(

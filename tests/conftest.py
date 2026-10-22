@@ -4,20 +4,32 @@ import os
 import pytest
 
 
+_ISOLATED_ENV = (
+    "MINDIE_DIAGNOSTICS_ROOT",
+    "MINDIE_DIAGNOSTICS_CONFIG",
+    "MINDIE_TOP_STATE_DIR",
+)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def isolated_diagnostics(tmp_path_factory):
     from mindie_diagnostics import configure
 
     root = tmp_path_factory.mktemp("top-diagnostics")
-    previous = os.environ.get("MINDIE_DIAGNOSTICS_ROOT")
+    state = root / "state"
+    state.mkdir()
+    previous = {name: os.environ.get(name) for name in _ISOLATED_ENV}
     os.environ["MINDIE_DIAGNOSTICS_ROOT"] = str(root)
+    os.environ["MINDIE_DIAGNOSTICS_CONFIG"] = str(root / "diagnostics.json")
+    os.environ["MINDIE_TOP_STATE_DIR"] = str(state)
     recorder = configure("npu-top", root=root)
     yield root
     recorder.close()
-    if previous is None:
-        os.environ.pop("MINDIE_DIAGNOSTICS_ROOT", None)
-    else:
-        os.environ["MINDIE_DIAGNOSTICS_ROOT"] = previous
+    for name, value in previous.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
 
 @pytest.fixture(scope="session")
 def standing_npu_snapshots(tmp_path_factory):

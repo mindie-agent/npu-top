@@ -34,6 +34,8 @@ def read_machines(path: Path | str) -> dict[str, Any]:
     path = Path(path).expanduser()
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
+    except TimeoutError:
+        raise
     except (OSError, UnicodeError) as exc:
         raise InventoryBridgeError(f"machine inventory unavailable: {path} ({type(exc).__name__})") from exc
     except json.JSONDecodeError as exc:
@@ -60,6 +62,8 @@ def inventory_lock(path: Path | str) -> Iterator[None]:
                 try:
                     msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
                     break
+                except TimeoutError:
+                    raise
                 except OSError as exc:
                     if time.monotonic() >= deadline:
                         raise InventoryBridgeError("timed out waiting for machine inventory lock") from exc
@@ -112,6 +116,8 @@ def _write_machines_unlocked(target: Path, document: Mapping[str, Any]) -> Path:
     except BaseException:
         try:
             os.unlink(temporary)
+        except TimeoutError:
+            raise
         except OSError:
             pass
         raise
@@ -124,10 +130,14 @@ def _fsync_directory(path: Path) -> None:
         return
     try:
         descriptor = os.open(path, os.O_RDONLY)
+    except TimeoutError:
+        raise
     except OSError as exc:
         raise InventoryBridgeError(f"cannot open inventory directory for fsync: {path}") from exc
     try:
         os.fsync(descriptor)
+    except TimeoutError:
+        raise
     except OSError as exc:
         raise InventoryBridgeError(f"inventory directory fsync failed: {path}") from exc
     finally:

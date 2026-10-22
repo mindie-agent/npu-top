@@ -189,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "inventory":
         try:
             payload = _inventory_sync(args)
-        except (ClientError, OSError, ValueError) as exc:
+        except (ClientError, TimeoutError, OSError, ValueError) as exc:
             capture_failure(exc, "inventory_sync_failed")
             print(str(exc), file=sys.stderr)
             return 2

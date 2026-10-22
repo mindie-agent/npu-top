@@ -1,3 +1,10 @@
+"""Frontend static asset resolution for the packaged console.
+
+[Role] Resolves the bundled `npu_top/static` directory and fails closed when a wheel lacks `index.html`.
+[Invariants] Static paths are confined to the packaged asset tree; a missing entry point raises `SystemExit` with install guidance rather than serving a partial console.
+[Timeouts & Locks] Pure filesystem existence checks; zero locks, network, or subprocesses.
+[Side-Effect Policy] Read-only path resolution; raises `SystemExit` when required assets are absent.
+"""
 from __future__ import annotations
 
 from pathlib import Path

@@ -262,6 +262,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         try:
             self._get()
+        except TimeoutError as exc:
+            reference = capture_failure(exc, "storage_timeout")
+            self.json_response({"error": "Monitor storage timed out; retry later",
+                                "error_type": type(exc).__name__, "diagnostic_ref": reference},
+                               HTTPStatus.SERVICE_UNAVAILABLE)
         except (sqlite3.Error, OSError) as exc:
             code = getattr(exc, "sqlite_errorcode", 0)
             busy = code & 255 in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)

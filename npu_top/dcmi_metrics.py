@@ -10,8 +10,9 @@ unparseable header aborts before any getter instead of guessing enums; a
 nonzero `dcmi_init` aborts before any getter. The cause decoder is imported from
 `dcmi_telemetry` (or `--cause-module`); no copied fallback exists here.
 [Timeouts & Locks] One foreground process bounded by `--duration` and an
-optional `--stop-file`; no daemon. The SSH caller must use an outer timeout of
-at least `duration + 5 s` cleanup.
+optional `--stop-file`; no daemon. Summary statistics retain only a 10,000-entry
+timing tail, so memory stays O(1) across long runs. The SSH caller must use an
+outer timeout of at least `duration + 5 s` cleanup.
 [Side-Effect Policy] Read-only getters only (`dcmi_init`, frequency, power,
 temperature, utilization, HBM info, device info); no setter, no compute.
 """
@@ -25,9 +26,10 @@ import json
 import os
 import sys
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 DEFAULT_HEADER_PATH = "/usr/local/dcmi/dcmi_interface_api.h"
 DEFAULT_LIBRARY_PATH = "/usr/local/dcmi/libdcmi.so"
@@ -65,6 +67,8 @@ def _iso_from_ns(value: int) -> str:
 def _read_bytes(path: str) -> Optional[bytes]:
     try:
         return Path(path).read_bytes()
+    except TimeoutError:
+        raise
     except OSError:
         return None
 
@@ -162,6 +166,8 @@ def configure_library(lib_path: str) -> Tuple[Any, int]:
     """Load and bind once, then call `dcmi_init` once."""
     try:
         lib = ctypes.CDLL(lib_path)
+    except TimeoutError:
+        raise
     except OSError as exc:
         raise StartupError("library", f"cannot load {lib_path}: {exc}") from exc
     try:
@@ -373,31 +379,33 @@ def sample_card(
     }
 
 
-def _interval_summary(starts: List[int]) -> Dict[str, Optional[float]]:
-    if len(starts) < 2:
+def _interval_summary(
+    starts: Iterable[int], sample_count: Optional[int] = None,
+) -> Dict[str, Optional[float]]:
+    retained = list(starts)
+    if len(retained) < 2:
         return {"count": 0, "min_ms": None, "median_ms": None, "p95_ms": None, "max_ms": None}
-    intervals = [(right - left) / 1e6 for left, right in zip(starts, starts[1:])]
+    intervals = [(right - left) / 1e6 for left, right in zip(retained, retained[1:])]
     ordered = sorted(intervals)
     p95 = ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))]
+    count = len(intervals) if sample_count is None else max(0, sample_count - 1)
     return {
-        "count": len(intervals), "min_ms": round(min(intervals), 3),
+        "count": count, "min_ms": round(min(intervals), 3),
         "median_ms": round(ordered[len(ordered) // 2], 3),
         "p95_ms": round(p95, 3), "max_ms": round(max(intervals), 3),
     }
 
 
-def _getter_summary(samples: List[Dict[str, Any]]) -> Dict[str, Dict[str, Optional[float]]]:
-    durations: Dict[str, List[int]] = {}
-    for sample in samples:
-        for card in sample["cards"].values():
-            for name, getter in card["getters"].items():
-                if getter.get("duration_ns") is not None:
-                    durations.setdefault(name, []).append(int(getter["duration_ns"]))
+def _getter_summary(
+    durations: Dict[str, Iterable[int]], counts: Optional[Dict[str, int]] = None,
+) -> Dict[str, Dict[str, Optional[float]]]:
     summary: Dict[str, Dict[str, Optional[float]]] = {}
     for name, values in sorted(durations.items()):
         ordered = sorted(values)
+        if not ordered:
+            continue
         summary[name] = {
-            "count": len(ordered),
+            "count": len(ordered) if counts is None else counts.get(name, len(ordered)),
             "min_us": round(min(ordered) / 1000, 3),
             "median_us": round(ordered[len(ordered) // 2] / 1000, 3),
             "max_us": round(max(ordered) / 1000, 3),
@@ -466,8 +474,11 @@ def run_sampler(args: argparse.Namespace) -> int:
     interval_ns = int(args.interval * 1e9)
     schedule_start_ns = time.monotonic_ns()
     deadline_ns = schedule_start_ns + int(args.duration * 1e9)
-    starts: List[int] = []
-    samples: List[Dict[str, Any]] = []
+    # Keep only a bounded tail of timing inputs so long runs stay O(1) in memory.
+    starts: deque[int] = deque(maxlen=10000)
+    getter_durations: Dict[str, deque[int]] = {}
+    getter_counts: Dict[str, int] = {}
+    sample_count = 0
     stop_reason = "duration"
     index = 0
     while True:
@@ -519,13 +530,22 @@ def run_sampler(args: argparse.Namespace) -> int:
         }
         print(json.dumps(sample, sort_keys=True), flush=True)
         starts.append(sample_start_wall_ns)
-        samples.append(sample)
+        for card in card_records.values():
+            for name, getter in card["getters"].items():
+                duration_ns = getter.get("duration_ns")
+                if duration_ns is None:
+                    continue
+                getter_durations.setdefault(
+                    name, deque(maxlen=10000),
+                ).append(int(duration_ns))
+                getter_counts[name] = getter_counts.get(name, 0) + 1
+        sample_count += 1
         index += 1
     summary = {
         "type": "summary", "run_id": run_id, "stop_reason": stop_reason,
-        "sample_count": len(samples),
-        "interval_ms": _interval_summary(starts),
-        "getter_latency_us": _getter_summary(samples),
+        "sample_count": sample_count,
+        "interval_ms": _interval_summary(starts, sample_count),
+        "getter_latency_us": _getter_summary(getter_durations, getter_counts),
         "finished_at": _iso_from_ns(time.time_ns()),
         "caller_timeout_guidance_s": round(args.duration + CALLER_CLEANUP_SECONDS, 3),
     }

@@ -157,7 +157,7 @@ class SshAccess:
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
                 timeout=12, check=False, cwd=self.working_dir,
             )
-        except subprocess.TimeoutExpired:
+        except (subprocess.TimeoutExpired, TimeoutError):
             return False, "SSH 连接超时"
         except OSError as exc:
             return False, f"本地 SSH 启动失败：{exc.strerror or type(exc).__name__}"
@@ -186,7 +186,7 @@ class SshAccess:
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=12, check=False,
                 cwd=self.working_dir,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except (subprocess.TimeoutExpired, TimeoutError, OSError) as exc:
             return KeyInstallResult("not_started", f"默认身份连接检查失败：{type(exc).__name__}")
         if check.returncode != 0:
             error = " ".join(check.stderr.split())[-500:]
@@ -206,7 +206,7 @@ class SshAccess:
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=15, check=False,
                 cwd=self.working_dir,
             )
-        except subprocess.TimeoutExpired:
+        except (subprocess.TimeoutExpired, TimeoutError):
             return KeyInstallResult("unknown", "密钥安装超时；远端授权文件写入结果不确定，请先核对")
         except OSError as exc:
             return KeyInstallResult("not_started", f"无法启动密钥安装：{type(exc).__name__}")

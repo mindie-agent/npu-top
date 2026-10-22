@@ -460,7 +460,7 @@ class HostProbe:
             return {}, {"state": "unchanged"}
         try:
             result = self._run_script(server, build_process_detail_script(pids), min(self.timeout, 15))
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except (TimeoutError, OSError, subprocess.TimeoutExpired) as exc:
             return {}, {"state": "unavailable", "stage": "process_details", "error_type": type(exc).__name__}
         if result.returncode != 0:
             return {}, {"state": "unavailable", "stage": "process_details", "exit_code": result.returncode,
@@ -557,8 +557,9 @@ class HostProbe:
         script = build_frequency_script(cards, budget)
         try:
             result = self._run_script(server, script, outer_timeout)
-        except subprocess.TimeoutExpired as exc:
-            output = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        except (subprocess.TimeoutExpired, TimeoutError) as exc:
+            raw_stdout = getattr(exc, "stdout", None)
+            output = raw_stdout.decode("utf-8", errors="replace") if isinstance(raw_stdout, bytes) else (raw_stdout or "")
             parsed = self._parse_frequency_sections(output)
             return parsed, self._frequency_status(
                 cards, parsed, "partial" if parsed else "unavailable",
@@ -607,6 +608,8 @@ class HostProbe:
             }
         try:
             source = Path(dcmi_telemetry.__file__).read_text(encoding="utf-8")
+        except TimeoutError:
+            raise
         except OSError as exc:
             return {"state": "unavailable", "stage": "dcmi",
                     "error_type": type(exc).__name__, "error": str(exc)[-800:]}
@@ -616,7 +619,7 @@ class HostProbe:
                 ["--cards", ",".join(str(card) for card in cards), "--device", "0"],
                 DCMI_TIMEOUT_SECONDS,
             )
-        except subprocess.TimeoutExpired as exc:
+        except (subprocess.TimeoutExpired, TimeoutError) as exc:
             return {"state": "unavailable", "stage": "dcmi",
                     "error_type": type(exc).__name__, "timed_out": True}
         except OSError as exc:
@@ -655,8 +658,9 @@ class HostProbe:
         effective_timeout = max(self.timeout + 25, 45) if include_infrastructure else self.timeout
         try:
             result = self._run_script(server, script, effective_timeout)
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"SSH 探查超时（{exc.timeout:g}s）") from exc
+        except (subprocess.TimeoutExpired, TimeoutError) as exc:
+            timeout = getattr(exc, "timeout", effective_timeout)
+            raise RuntimeError(f"SSH 探查超时（{timeout:g}s）") from exc
         if result.returncode != 0:
             raise RuntimeError((result.stderr or result.stdout or "SSH 探查失败")[-1200:])
         sections = split_sections(result.stdout)

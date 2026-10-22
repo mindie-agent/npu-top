@@ -49,7 +49,7 @@ class VawsTopClient:
             except (json.JSONDecodeError, AttributeError):
                 message = None
             raise ClientError(message or f"npu-top API returned HTTP {exc.code}") from exc
-        except (OSError, URLError, json.JSONDecodeError) as exc:
+        except (TimeoutError, OSError, URLError, json.JSONDecodeError) as exc:
             raise ClientError(f"npu-top unavailable at {self.base_url}: {exc}") from exc
 
     def servers(self) -> dict[str, Any]:
