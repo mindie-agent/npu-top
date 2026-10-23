@@ -26,6 +26,7 @@ from .agent_view import (
 )
 from .db import Database
 from .device_adapter import DeviceAdapter
+from .inventory_bridge import configured_coordinator_paths, sync_to_coordinator
 from .scheduler import AdaptiveScheduler
 from .settings import Settings
 from .telemetry_window import build_window, seconds_to_ns
@@ -486,6 +487,7 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(passwords, list) or len(passwords) > 20 or not all(isinstance(item, str) for item in passwords):
             raise ValueError("passwords 最多包含 20 个字符串候选")
         results = []
+        registered_servers: list[dict[str, Any]] = []
         for index, entry in enumerate(entries):
             receipt = {"input_index": index, "server": None, "registration": "not_started",
                        "auth": {"ok": False, "state": "not_started"}}
@@ -504,6 +506,7 @@ class Handler(BaseHTTPRequestHandler):
                     "host": host, "port": port, "username": username, "tags": tags,
                 })
                 receipt.update(server=server, registration="completed")
+                registered_servers.append(server)
                 stage = "bootstrap"
                 with get_recorder("npu-top").operation("top.server.bootstrap") as operation:
                     auth = self.app.adapter.bootstrap_with_passwords(server, passwords)
@@ -528,7 +531,29 @@ class Handler(BaseHTTPRequestHandler):
                 elif stage == "validate":
                     receipt["auth"]["error"] = str(exc)
             results.append(receipt)
-        self.json_response({"results": results}, HTTPStatus.MULTI_STATUS)
+        payload: dict[str, Any] = {"results": results}
+        sync_paths = configured_coordinator_paths(getattr(self.app.settings, "inventory_files", ()))
+        if registered_servers and sync_paths and body.get("sync_coordinator", True):
+            snapshots = self.app.scheduler.snapshots()
+            sync_reports: list[dict[str, Any]] = []
+            for path in sync_paths:
+                try:
+                    report = sync_to_coordinator(
+                        path, registered_servers, snapshots,
+                        include_unprobed=True, create_if_missing=True,
+                    )
+                    sync_reports.append({"status": "completed", **report})
+                except Exception as exc:  # noqa: BLE001
+                    ref = capture_failure(exc, "coordinator_inventory_sync_failed")
+                    sync_reports.append({
+                        "status": "failed",
+                        "path": str(path),
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                        "diagnostic_ref": ref,
+                    })
+            payload["coordinator_sync"] = sync_reports
+        self.json_response(payload, HTTPStatus.MULTI_STATUS)
 
     def _static(self, request_path: str) -> None:
         root = self.app.web_root
@@ -574,4 +599,3 @@ class AppServer(ThreadingHTTPServer):
         host, port = address
         super().__init__((require_loopback_bind(host), port), Handler)
         self.app = app
-

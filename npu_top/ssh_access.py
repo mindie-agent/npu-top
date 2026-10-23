@@ -12,6 +12,8 @@ import os
 import re
 import shlex
 import subprocess
+import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -178,6 +180,18 @@ class SshAccess:
             "-p", str(server["port"]), f"{server['username']}@{server['host']}",
         ]
 
+    def _authorized_keys_remote_command(self) -> str:
+        if not self.public_key.exists():
+            self.ensure_key()
+        public_key = self.public_key.read_text(encoding="utf-8").strip()
+        quoted = shlex.quote(public_key)
+        return (
+            "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && "
+            "chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys && "
+            f"(grep -qxF {quoted} ~/.ssh/authorized_keys; code=$?; "
+            f"case $code in 0) ;; 1) printf '%s\\n' {quoted} >> ~/.ssh/authorized_keys ;; *) exit $code ;; esac)"
+        )
+
     def install_key_with_default_identity(self, server: dict[str, Any]) -> KeyInstallResult:
         """Preserve the write outcome separately from later key verification."""
         try:
@@ -192,14 +206,7 @@ class SshAccess:
             error = " ".join(check.stderr.split())[-500:]
             rejected = "Permission denied" in error
             return KeyInstallResult("not_started", error or f"SSH exit {check.returncode}", rejected)
-        public_key = self.public_key.read_text(encoding="utf-8").strip()
-        quoted = shlex.quote(public_key)
-        remote = (
-            "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && "
-            "chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys && "
-            f"(grep -qxF {quoted} ~/.ssh/authorized_keys; code=$?; "
-            f"case $code in 0) ;; 1) printf '%s\\n' {quoted} >> ~/.ssh/authorized_keys ;; *) exit $code ;; esac)"
-        )
+        remote = self._authorized_keys_remote_command()
         try:
             install = subprocess.run(
                 [*self._default_identity_base(server), "sh", "-c", shlex.quote(remote)], stdin=subprocess.DEVNULL,
@@ -213,3 +220,70 @@ class SshAccess:
         if install.returncode == 0:
             return KeyInstallResult("completed")
         return KeyInstallResult("unknown", "密钥安装未获完整成功确认；请先核对远端授权文件")
+
+    def install_key_with_password(self, server: dict[str, Any], password: str) -> KeyInstallResult:
+        """Install the monitor public key using one-time in-memory SSH_ASKPASS auth."""
+        validate_endpoint(server["host"], int(server["port"]), server["username"])
+        remote = self._authorized_keys_remote_command()
+        command = [
+            "ssh", "-T",
+            "-o", "BatchMode=no",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", f"UserKnownHostsFile={self.known_hosts}",
+            "-o", "LogLevel=ERROR",
+            "-o", "ConnectTimeout=8",
+            "-o", "ConnectionAttempts=1",
+            "-o", "PreferredAuthentications=password,keyboard-interactive",
+            "-o", "PubkeyAuthentication=no",
+            "-o", "NumberOfPasswordPrompts=1",
+            "-p", str(server["port"]),
+            f"{server['username']}@{server['host']}",
+            "sh", "-c", shlex.quote(remote),
+        ]
+        with tempfile.TemporaryDirectory(prefix="mindie-top-askpass-") as temp_raw:
+            temp_dir = Path(temp_raw)
+            if self.is_windows:
+                helper_py = temp_dir / "askpass.py"
+                helper_py.write_text(
+                    "import os, sys\n"
+                    "sys.stdout.write(os.environ.get('MINDIE_TOP_SSH_PASSWORD', '') + '\\n')\n",
+                    encoding="utf-8",
+                )
+                helper = temp_dir / "askpass.cmd"
+                helper.write_text(
+                    f'@echo off\r\nsetlocal\r\n"{sys.executable}" "{helper_py}"\r\n',
+                    encoding="utf-8",
+                )
+            else:
+                helper = temp_dir / "askpass.sh"
+                helper.write_text(
+                    "#!/bin/sh\nprintf '%s\\n' \"${MINDIE_TOP_SSH_PASSWORD}\"\n",
+                    encoding="utf-8",
+                )
+                helper.chmod(0o700)
+            env = {
+                **os.environ,
+                "MINDIE_TOP_SSH_PASSWORD": password,
+                "SSH_ASKPASS": str(helper),
+                "SSH_ASKPASS_REQUIRE": "force",
+                "DISPLAY": os.environ.get("DISPLAY") or "mindie-top:0",
+            }
+            try:
+                install = subprocess.run(
+                    command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE, text=True, timeout=15, check=False,
+                    cwd=self.working_dir, env=env,
+                )
+            except subprocess.TimeoutExpired:
+                return KeyInstallResult("unknown", "密钥安装超时；远端授权文件写入结果不确定，请先核对")
+            except OSError as exc:
+                return KeyInstallResult("not_started", f"无法启动密钥安装：{type(exc).__name__}")
+        if install.returncode == 0:
+            return KeyInstallResult("completed")
+        error = " ".join((install.stderr or "").split())
+        if password:
+            error = error.replace(password, "[REDACTED]")
+        error = error[-500:]
+        if install.returncode == 255 and "Permission denied" in error:
+            return KeyInstallResult("not_started", error or "密码认证被拒绝", authentication_rejected=True)
+        return KeyInstallResult("unknown", error or "密钥安装未获完整成功确认；请先核对远端授权文件")

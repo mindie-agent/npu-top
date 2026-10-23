@@ -214,9 +214,11 @@ class ProbeTests(unittest.TestCase):
             self.assertEqual(adapter.discover_servers(), [])
             self.assertIsNone(adapter.key_bootstrap)
 
-    def test_password_bootstrap_requires_configured_command(self) -> None:
+    def test_password_bootstrap_uses_builtin_askpass_without_configured_command(self) -> None:
         with tempfile.TemporaryDirectory() as state, contextlib.ExitStack() as resources:
             ssh = SshAccess(Path(state), PROJECT)
+            ssh.public_key.parent.mkdir(parents=True, exist_ok=True)
+            ssh.public_key.write_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItest npu-fleet-monitor\n", encoding="utf-8")
             adapter = DeviceAdapter(ssh)
             server = {"host": "198.51.100.1", "port": 22, "username": "root"}
             db = Database(Path(state) / "test.sqlite3")
@@ -224,14 +226,48 @@ class ProbeTests(unittest.TestCase):
             server = db.upsert_server({**server, "id": "one", "name": "one"})
             adapter.bootstrap_state = db
             resources.callback(db.close)
+            completed = subprocess.CompletedProcess([], 0, "", "")
             with (
                 mock.patch.object(ssh, "preflight", return_value={"ok": True}),
-                mock.patch.object(ssh, "check_key_auth", return_value=(False, None)),
-                mock.patch.object(ssh, "install_key_with_default_identity", return_value=KeyInstallResult("not_started", authentication_rejected=True)),
+                mock.patch.object(ssh, "check_key_auth", side_effect=[(False, None), (True, None)]),
+                mock.patch.object(
+                    ssh,
+                    "install_key_with_default_identity",
+                    return_value=KeyInstallResult("not_started", authentication_rejected=True),
+                ),
+                mock.patch("npu_top.ssh_access.subprocess.run", return_value=completed) as run,
             ):
-                result = adapter.bootstrap_with_passwords(server, ["secret"])
-        self.assertFalse(result["ok"])
-        self.assertIn("NFM_BOOTSTRAP_COMMAND", result["error"])
+                result = adapter.bootstrap_with_passwords(server, ["secret-pass"])
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["method"], "password-askpass")
+            self.assertEqual(result["attempts"], 1)
+            self.assertEqual(result["state"], "verified")
+            argv = run.call_args.args[0]
+            self.assertIn("BatchMode=no", " ".join(argv))
+            self.assertNotIn("secret-pass", " ".join(argv))
+            env = run.call_args.kwargs["env"]
+            self.assertEqual(env["MINDIE_TOP_SSH_PASSWORD"], "secret-pass")
+            self.assertEqual(env["SSH_ASKPASS_REQUIRE"], "force")
+
+    def test_builtin_askpass_redacts_password_and_classifies_auth_rejection_vs_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as state:
+            ssh = SshAccess(Path(state), PROJECT)
+            ssh.public_key.parent.mkdir(parents=True, exist_ok=True)
+            ssh.public_key.write_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItest npu-fleet-monitor\n", encoding="utf-8")
+            server = {"host": "198.51.100.1", "port": 22, "username": "root"}
+            denied = subprocess.CompletedProcess([], 255, "", "Permission denied (password): bad-secret")
+            with mock.patch("npu_top.ssh_access.subprocess.run", return_value=denied):
+                res_denied = ssh.install_key_with_password(server, "bad-secret")
+            self.assertEqual(res_denied.state, "not_started")
+            self.assertTrue(res_denied.authentication_rejected)
+            self.assertNotIn("bad-secret", res_denied.error or "")
+            self.assertIn("[REDACTED]", res_denied.error or "")
+
+            uncertain = subprocess.CompletedProcess([], 1, "", "disk full after login")
+            with mock.patch("npu_top.ssh_access.subprocess.run", return_value=uncertain):
+                res_unknown = ssh.install_key_with_password(server, "bad-secret")
+            self.assertEqual(res_unknown.state, "unknown")
+            self.assertFalse(res_unknown.authentication_rejected)
 
     def test_socket_failure_is_reported_as_ssh_error(self) -> None:
         with tempfile.TemporaryDirectory() as state:
@@ -330,7 +366,6 @@ class ProbeTests(unittest.TestCase):
             probe.collect({"id": "s1", "name": "s1", "host": "10.0.0.1"}, include_infrastructure=False)
             probe.collect({"id": "s1", "name": "s1", "host": "10.0.0.1"}, include_infrastructure=True)
         self.assertEqual(observed_timeouts, [20, 45])
-
 
     def test_probe_collect_preserves_fractional_timestamp(self) -> None:
         from npu_top.probe import HostProbe
