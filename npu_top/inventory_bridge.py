@@ -17,7 +17,7 @@ import stat
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator, Mapping, Sequence
 
 from .agent_view import weight_mounts
 from .ssh_access import validate_endpoint
@@ -28,6 +28,22 @@ _LOCK_POLL_SECONDS = 0.02
 
 class InventoryBridgeError(ValueError):
     """A machine inventory document cannot be read, validated, or written safely."""
+
+
+def configured_coordinator_paths(inventory_files: Sequence[Path | str] = ()) -> list[Path]:
+    """Return deduplicated coordinator `machines.json` paths from settings and environment."""
+    candidates: list[Path] = [Path(item).expanduser() for item in inventory_files if str(item).strip()]
+    coord_state_dir = (os.environ.get("MINDIE_COORDINATOR_STATE_DIR") or "").strip()
+    if coord_state_dir:
+        candidates.append(Path(coord_state_dir).expanduser() / "machines.json")
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            unique.append(path)
+    return unique
 
 
 def read_machines(path: Path | str) -> dict[str, Any]:
@@ -237,13 +253,26 @@ def _card_profile(
 
 
 def observed_machine_records(
-    servers: list[dict[str, Any]], snapshots: dict[str, dict[str, Any]],
+    servers: list[dict[str, Any]],
+    snapshots: dict[str, dict[str, Any]],
+    *,
+    include_unprobed: bool = False,
 ) -> list[dict[str, Any]]:
     """Project cached server observations into non-destructive C1 updates."""
     records = []
     for server in servers:
         snapshot = snapshots.get(server.get("id"))
         if not snapshot or snapshot.get("status", "online") != "online":
+            if include_unprobed:
+                records.append({
+                    "alias": str(server.get("name") or server["host"]),
+                    "host": server["host"],
+                    "port": int(server["port"]),
+                    "username": str(server.get("username") or "root"),
+                    "hardware": {},
+                    "tags": [str(tag) for tag in server.get("tags") or [] if str(tag).strip()],
+                    "mounts": [],
+                })
             continue
         devices = [device for device in snapshot.get("devices") or [] if isinstance(device, dict)]
         names = [str(device.get("name") or "") for device in devices if device.get("name")]
@@ -270,6 +299,13 @@ def observed_machine_records(
             tags.extend(["950", "single-die"])
         elif family == "310P":
             tags.append("single-die")
+        if include_unprobed:
+            known = {item.casefold() for item in tags}
+            for tag in server.get("tags") or []:
+                token = str(tag).strip()
+                if token and token.casefold() not in known:
+                    tags.append(token)
+                    known.add(token.casefold())
         mounts = [
             {"target": row["target"], "weight_candidate": True}
             for row in weight_mounts(snapshot)
@@ -371,12 +407,20 @@ def merge_observations(
 
 
 def sync_to_coordinator(
-    path: Path | str, servers: list[dict[str, Any]], snapshots: dict[str, dict[str, Any]],
+    path: Path | str,
+    servers: list[dict[str, Any]],
+    snapshots: dict[str, dict[str, Any]],
+    *,
+    include_unprobed: bool = False,
+    create_if_missing: bool = False,
 ) -> dict[str, Any]:
     target = Path(path).expanduser().resolve()
-    observations = observed_machine_records(servers, snapshots)
+    observations = observed_machine_records(servers, snapshots, include_unprobed=include_unprobed)
     with inventory_lock(target):
-        document = read_machines(target)
+        if create_if_missing and not target.exists():
+            document: dict[str, Any] = {"version": 1, "default_alias": None, "machines": []}
+        else:
+            document = read_machines(target)
         merged, counts = merge_observations(document, observations)
         written = _write_machines_unlocked(target, merged)
     return {

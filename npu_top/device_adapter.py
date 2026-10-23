@@ -100,21 +100,21 @@ class DeviceAdapter:
             return self._verify_installation(server, installation, "default-identity", 0)
         if not passwords:
             return {"ok": False, "method": None, "attempts": 0, "error": "密钥登录失败，且未提供一次性密码"}
-        if self.key_bootstrap is None:
-            return {
-                "ok": False, "method": None, "attempts": 0,
-                "error": "未配置 NFM_BOOTSTRAP_COMMAND，无法使用一次性密码安装监控公钥",
-            }
 
+        method = "external-bootstrap" if self.key_bootstrap is not None else "password-askpass"
         error = "密码候选均未通过认证"
         for index, password in enumerate(passwords, start=1):
             if not isinstance(password, str) or not password:
                 continue
-            installation = self._recorded_installation(server, "external-bootstrap", index,
-                                                       lambda: self.key_bootstrap.run(server, self.ssh.public_key, password))
+            install_call = (
+                (lambda pwd=password: self.key_bootstrap.run(server, self.ssh.public_key, pwd))
+                if self.key_bootstrap is not None
+                else (lambda pwd=password: self.ssh.install_key_with_password(server, pwd))
+            )
+            installation = self._recorded_installation(server, method, index, install_call)
             if not installation.authentication_rejected or installation.recording_error:
-                return self._verify_installation(server, installation, "external-bootstrap", index)
-            error = installation.error
+                return self._verify_installation(server, method=method, installation=installation, attempts=index)
+            error = installation.error or error
         return {"ok": False, "method": None, "attempts": len(passwords), "error": error}
 
     def _recorded_installation(self, server, method, attempts, install):
