@@ -30,7 +30,7 @@ When a team shares a fleet of Ascend NPU servers, everyone asks the same questio
 - **Agentless SSH Probing Across All Major Ascend Generations**: Runs `npu-smi` on bare-metal hosts to see NPU usage across containers, with built-in parsers for **single-die (910B-class)**, **dual-die (A3 / 910C-class)**, and **Ascend 950 (A5)** hosts.
 - **Fast When You're Watching, Gentle When You're Not**: Refreshes every 1s / 5s / 10s / 30s while the web dashboard is open, and automatically drops back to 120s background polling when no browser tab is active.
 - **90-Day Trends & Heatmaps with a Hard Disk Cap**: Stores 15-minute host and per-card summaries for 1-hour to 90-day trend charts and 2-hour bucketed heatmaps (CPU, memory, NPU, HBM, and per-card AICore), while strictly capping the SQLite file at `1024 MB` (`NFM_SQLITE_MAX_MB`).
-- **Passwords Never Touch Disk**: When onboarding servers in batch, password candidates are piped in memory via `stdin` to install a dedicated Ed25519 public key and are never saved to databases, config files, or logs.
+- **Passwords Never Touch Disk**: When onboarding servers in batch, password candidates are used in memory to install a dedicated Ed25519 public key and are never saved to databases, config files, or logs.
 - **Ready-to-Use CLI & MCP Tools for AI Agents**: Provides 5 read-only MCP tools and matching CLI subcommands so your agent can screen candidate hosts from memory (`cache`) or trigger a fresh probe (`live`) without ever touching raw SSH commands or credentials.
 
 > [!IMPORTANT]
@@ -202,6 +202,14 @@ To stay reliable across shared multi-host Ascend fleets, `npu-top` isolates part
 
 ---
 
+## Adding Servers and Establishing Key Access
+
+Paste one IP per line in the add-server dialog and enter a one-time password. The default is `root:22`; the form also accepts an explicit username and port. `npu-top` checks existing identities, installs its dedicated public key through the bundled `SSH_ASKPASS` helper when needed, and verifies access over a fresh SSH connection. No bootstrap command or `sshpass` installation is required.
+
+The dialog shows results and failure details for each endpoint, prevents duplicate submissions while a request is pending, and clears the password field. Only an explicit authentication rejection permits the next password candidate. An uncertain installation must be checked before any further write.
+
+Custom authentication environments can set `MINDIE_TOP_BOOTSTRAP_COMMAND` (legacy alias `NFM_BOOTSTRAP_COMMAND`) to override the built-in installer. The command receives the password on stdin: exit `0` means installed, `77` means authentication rejected before any write, and other failures leave an uncertain outcome. Successful installation still requires an independent key-authentication check.
+
 ## Configuration Reference
 
 All settings are configured via environment variables (see [`.env.example`](./.env.example)):
@@ -211,7 +219,7 @@ All settings are configured via environment variables (see [`.env.example`](./.e
 | `NFM_STATE_DIR` | `./data` | Local folder for the SQLite DB, dedicated Ed25519 SSH key, `known_hosts`, and SSH control sockets |
 | `NFM_INVENTORY_FILES` | unset | Path-separated JSON machine inventory files imported as active hosts on startup |
 | `NFM_HOST_POOL_FILES` | unset | Plain-text host pool files (first column); hosts only in pool files automatically get the `低优先级` (low-priority) tag |
-| `NFM_BOOTSTRAP_COMMAND` | unset | Optional helper command template to install the monitor public key using a one-time password on `stdin` |
+| `MINDIE_TOP_BOOTSTRAP_COMMAND` (alias `NFM_BOOTSTRAP_COMMAND`) | unset; built-in installer | Optional custom authentication command overriding the default installer; receives the password on `stdin` |
 | `NFM_HBM_BUSY_THRESHOLD_MB` | `8192` | Fallback HBM threshold (MB) to mark a card busy (avoids treating ~6 GB idle A3 driver memory as busy) |
 | `NFM_SQLITE_MAX_MB` | `1024` | Hard cap on SQLite database size in MB (minimum 16); auto-prunes oldest days at 85% capacity |
 | `NFM_RETENTION_DAYS` | `90` | Number of days to retain historical summaries and heatmaps |

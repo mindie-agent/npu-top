@@ -21,6 +21,7 @@ from typing import Any
 
 HOST_PATTERN = re.compile(r"^[A-Za-z0-9_.:\-]+$")
 USER_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]+$")
+KEY_INSTALL_STARTED = "__NPU_TOP_KEY_INSTALL_STARTED__"
 
 
 def validate_endpoint(host: str, port: int, username: str) -> None:
@@ -110,7 +111,9 @@ class SshAccess:
             self.public_key.chmod(0o600)
         self._key_permissions_ready = True
 
-    def ssh_base(self, server: dict[str, Any], *, batch_mode: bool = True) -> list[str]:
+    def ssh_base(
+        self, server: dict[str, Any], *, batch_mode: bool = True, multiplex: bool = True,
+    ) -> list[str]:
         validate_endpoint(server["host"], int(server["port"]), server["username"])
         self.ensure_key()
         command = [
@@ -124,13 +127,15 @@ class SshAccess:
             "-o", "ServerAliveInterval=10",
             "-o", "ServerAliveCountMax=1",
         ]
-        if not self.is_windows:
+        if not self.is_windows and multiplex:
             control_path = Path("ssh-control") / "%C"
             command.extend([
                 "-o", "ControlMaster=auto",
                 "-o", "ControlPersist=90",
                 "-o", f"ControlPath={control_path}",
             ])
+        elif not self.is_windows:
+            command.extend(["-o", "ControlMaster=no", "-o", "ControlPath=none"])
         command.extend([
             "-i", str(self.private_key),
             "-o", "IdentitiesOnly=yes",
@@ -155,7 +160,9 @@ class SshAccess:
     def check_key_auth(self, server: dict[str, Any]) -> tuple[bool, str | None]:
         try:
             result = subprocess.run(
-                [*self.ssh_base(server), "true"], stdin=subprocess.DEVNULL,
+                # A cached session proves only that an earlier login worked.
+                # Bootstrap must authenticate a new connection with the key.
+                [*self.ssh_base(server, multiplex=False), "true"], stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
                 timeout=12, check=False, cwd=self.working_dir,
             )
@@ -186,10 +193,12 @@ class SshAccess:
         public_key = self.public_key.read_text(encoding="utf-8").strip()
         quoted = shlex.quote(public_key)
         return (
+            f"printf '%s\\n' {KEY_INSTALL_STARTED}; "
             "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && "
             "chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys && "
             f"(grep -qxF {quoted} ~/.ssh/authorized_keys; code=$?; "
-            f"case $code in 0) ;; 1) printf '%s\\n' {quoted} >> ~/.ssh/authorized_keys ;; *) exit $code ;; esac)"
+            # Existing authorized_keys may not end with a newline.
+            f"case $code in 0) ;; 1) printf '\\n%s\\n' {quoted} >> ~/.ssh/authorized_keys ;; *) exit $code ;; esac)"
         )
 
     def install_key_with_default_identity(self, server: dict[str, Any]) -> KeyInstallResult:
@@ -236,6 +245,9 @@ class SshAccess:
             "-o", "PreferredAuthentications=password,keyboard-interactive",
             "-o", "PubkeyAuthentication=no",
             "-o", "NumberOfPasswordPrompts=1",
+            # Never inherit a password-authenticated master from user config.
+            "-o", "ControlMaster=no",
+            "-o", "ControlPath=none",
             "-p", str(server["port"]),
             f"{server['username']}@{server['host']}",
             "sh", "-c", shlex.quote(remote),
@@ -270,20 +282,21 @@ class SshAccess:
             }
             try:
                 install = subprocess.run(
-                    command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE, text=True, timeout=15, check=False,
                     cwd=self.working_dir, env=env,
                 )
-            except subprocess.TimeoutExpired:
+            except (subprocess.TimeoutExpired, TimeoutError):
                 return KeyInstallResult("unknown", "密钥安装超时；远端授权文件写入结果不确定，请先核对")
             except OSError as exc:
                 return KeyInstallResult("not_started", f"无法启动密钥安装：{type(exc).__name__}")
         if install.returncode == 0:
             return KeyInstallResult("completed")
-        error = " ".join((install.stderr or "").split())
+        error = install.stderr or ""
         if password:
             error = error.replace(password, "[REDACTED]")
-        error = error[-500:]
-        if install.returncode == 255 and "Permission denied" in error:
+        error = " ".join(error.split())[-500:]
+        started = KEY_INSTALL_STARTED in (install.stdout or "")
+        if not started and install.returncode == 255 and "Permission denied" in error:
             return KeyInstallResult("not_started", error or "密码认证被拒绝", authentication_rejected=True)
         return KeyInstallResult("unknown", error or "密钥安装未获完整成功确认；请先核对远端授权文件")

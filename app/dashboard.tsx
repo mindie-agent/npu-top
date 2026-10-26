@@ -1,6 +1,7 @@
 'use client';
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { onboardingOutcomes, type OnboardingOutcome, type OnboardingReceipt } from './onboarding';
 
 type Chip = {
   chip_id?: number;
@@ -226,6 +227,9 @@ export default function Dashboard() {
   const [range, setRange] = useState('7d');
   const [metric, setMetric] = useState<MetricKey>('npu_util_percent');
   const [result, setResult] = useState('');
+  const [outcomes, setOutcomes] = useState<OnboardingOutcome[]>([]);
+  const [adding, setAdding] = useState(false);
+  const addingRef = useRef(false);
   const clientId = useMemo(() => `viewer_${crypto.randomUUID().replaceAll('-', '')}`, []);
 
   const load = useCallback(async () => { try { const response = await fetch(`${API}/api/overview`, { cache: 'no-store' }); if (!response.ok) throw new Error(`API ${response.status}`); setOverview(await response.json()); setError(''); } catch (reason) { setError(reason instanceof Error ? reason.message : '无法连接本地采集器'); } }, []);
@@ -247,29 +251,37 @@ export default function Dashboard() {
 
   async function addServers(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    if (addingRef.current) return;
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const lines = String(form.get('servers') || '').split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
     const servers = lines.map((line) => {
       const [name, host, port = '22', username = 'root', tags = ''] = line.split(',').map((value) => value.trim());
-      return { name, host: host || name, port: Number(port), username, tags: tags ? tags.split('|') : [] };
+      return { name, host: host || name, port: Number(port || '22'), username: username || 'root', tags: tags ? tags.split('|') : [] };
     });
     const passwords = String(form.get('passwords') || '').split(/\r?\n/).filter(Boolean);
+    form.delete('passwords');
+    const passwordField = formElement.elements.namedItem('passwords');
+    if (passwordField instanceof HTMLTextAreaElement) passwordField.value = '';
+    addingRef.current = true;
+    setAdding(true);
+    setOutcomes([]);
     setResult('正在逐台检查连接并配置监控密钥…');
     try {
-      type Receipt = { input_index: number; registration: string; auth: { ok: boolean; state?: string; installation?: string; error?: string }; failure?: { stage: string; error: string } };
-      const data = await requestJson<{ results: Receipt[] }>('/api/servers/batch', {
+      const data = await requestJson<{ results: OnboardingReceipt[] }>('/api/servers/batch', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ servers, passwords }),
       });
-      if (!Array.isArray(data.results) || data.results.length !== servers.length) throw new Error('服务器添加回执不完整，请先核对清单');
+      if (!Array.isArray(data.results)) throw new Error('服务器添加回执不完整，请先核对清单');
+      setOutcomes(onboardingOutcomes(servers, data.results));
       const ok = data.results.filter((item) => item.auth.ok).length;
-      const issues = data.results.filter((item) => !item.auth.ok || item.failure).map((item) => {
-        const outcome = item.auth.installation === 'completed' ? '密钥已安装；' : item.auth.state === 'unknown' ? '远端写入结果不确定，请先核对；' : '';
-        return `第 ${item.input_index + 1} 台：${outcome}${item.failure?.error || item.auth.error || '未完成'}`;
-      });
-      setResult(`${ok}/${servers.length} 台已验证密钥连接。${issues.join('；')} 一次性密码未保存。`);
+      setResult(`${ok}/${servers.length} 台已验证密钥连接。一次性密码已从输入框清除。`);
       await load();
     } catch (reason) {
       setResult(reason instanceof Error ? reason.message : '批量添加结果未确认，请先核对清单');
+    } finally {
+      passwords.fill('');
+      addingRef.current = false;
+      setAdding(false);
     }
   }
   async function action(path: string, method = 'POST', body?: object) {
@@ -323,7 +335,23 @@ export default function Dashboard() {
       </div>
     </section>
 
-    {modal && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setModal(false)}><section className="modal" role="dialog" aria-modal="true" aria-labelledby="add-title"><header><div><p className="section-kicker">Batch onboarding</p><h2 id="add-title">添加 NPU 服务器</h2></div><button aria-label="关闭" onClick={() => setModal(false)}>×</button></header><form onSubmit={addServers}><label>服务器列表<span>每行：名称, 主机, 端口, 用户, 标签1|标签2</span><textarea name="servers" required rows={7} placeholder={'example-a3-01, 192.0.2.21, 22, root, A3|训练\nexample-a2-07, 192.0.2.37, 22, root, A2'} /></label><label>一次性密码候选<span>可选，每行一个；仅在本次请求内按顺序尝试</span><textarea name="passwords" rows={4} autoComplete="new-password" spellCheck={false} /></label><div className="security-note"><b>安全连接策略</b><p>先检查已有密钥；失败后才尝试候选密码。成功后安装项目专用 Ed25519 公钥，后续只使用密钥。Host Key 变化会立即中止连接。</p></div>{result && <p className="form-result">{result}</p>}<footer><button type="button" className="secondary-button" onClick={() => setModal(false)}>关闭</button><button type="submit" className="primary-button">开始检查并添加</button></footer></form></section></div>}
+    {modal && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setModal(false)}>
+      <section className="modal" role="dialog" aria-modal="true" aria-labelledby="add-title">
+        <header><div><p className="section-kicker">Batch onboarding</p><h2 id="add-title">添加 NPU 服务器</h2></div><button aria-label="关闭" onClick={() => setModal(false)}>×</button></header>
+        <form onSubmit={addServers} aria-busy={adding}>
+          <label>服务器列表<span>每行一个 IP，或：名称, 主机, 端口, 用户, 标签1|标签2；默认端口 22、用户 root</span><textarea name="servers" required rows={7} disabled={adding} placeholder={'192.0.2.21\nexample-a2-07, 192.0.2.37, 22, root, A2'} /></label>
+          <label>一次性密码候选<span>可选，每行一个；已有密钥可登录时无需填写</span><textarea name="passwords" rows={4} disabled={adding} autoComplete="new-password" spellCheck={false} /></label>
+          <div className="security-note"><b>自动建立密钥连接</b><p>先检查已有密钥；需要时使用本次密码安装专用公钥，再验证密钥登录。密码仅用于本次请求。服务器身份指纹变化时会中止连接。</p></div>
+          {result && <p className="form-result" role="status">{result}</p>}
+          {outcomes.length > 0 && <ul className="onboarding-results" aria-label="服务器连接结果">{outcomes.map((item, index) =>
+            <li className={`onboarding-result onboarding-result--${item.status}`} key={`${item.endpoint}-${index}`}>
+              <strong>{item.endpoint}</strong><span>{item.message}</span>
+            </li>,
+          )}</ul>}
+          <footer><button type="button" className="secondary-button" onClick={() => setModal(false)}>关闭</button><button type="submit" className="primary-button" disabled={adding}>{adding ? '正在检查…' : '开始检查并添加'}</button></footer>
+        </form>
+      </section>
+    </div>}
     {tagServer && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setTagServer(null)}><section className="modal modal--tags" role="dialog" aria-modal="true" aria-labelledby="tag-title"><header><div><p className="section-kicker">Server tags</p><h2 id="tag-title">编辑 {tagServer.name} 的标签</h2></div><button aria-label="关闭" onClick={() => setTagServer(null)}>×</button></header><form onSubmit={saveTags}><label>服务器标签<span>使用竖线、逗号或中文逗号分隔，最多 20 个</span><input name="tags" autoFocus defaultValue={tagServer.tags.filter((tag) => tag !== LOW_PRIORITY_TAG).join(' | ')} placeholder="A3 | 训练 | 北京机房" /></label>{tagServer.tags.includes(LOW_PRIORITY_TAG) && <div className="security-note security-note--priority"><b>主工作区低优先级设备</b><p>“低优先级”由主工作区设备状态自动同步，保存时会继续保留。</p></div>}<footer><button type="button" className="secondary-button" onClick={() => setTagServer(null)}>取消</button><button type="submit" className="primary-button">保存标签</button></footer></form></section></div>}
   </main>;
 }
