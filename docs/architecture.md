@@ -30,7 +30,8 @@ Everything that talks to a remote host is wired together in `DeviceAdapter` (`np
   - `NFM_INVENTORY_FILES`: JSON machine inventory files (`{"machines": [...]}`) providing display aliases and hardware tags.
   - `NFM_HOST_POOL_FILES`: Plain-text host lists (only the first column is read; any adjacent credential columns are ignored, and hosts found only in pool files automatically get the `低优先级` low-priority tag).
   - `npu-top` **never walks parent folders or Git directories to guess machine lists.**
-- **Zero-Plaintext Key Onboarding (`ExternalKeyBootstrap`)**: When `NFM_BOOTSTRAP_COMMAND` is configured, batch onboarding pipes one-time password candidates over `stdin` in memory to install the monitor's public key. **Passwords are never stored in SQLite tables, config files, CLI flags, or logs.**
+- **Built-in Key Onboarding (`SshAccess`)**: Batch onboarding first checks the monitor key and default SSH identities, then uses the bundled `SSH_ASKPASS` helper with the request's password candidates. No bootstrap command or `sshpass` installation is required. The helper source contains no credentials; the password is passed only in the SSH child process environment. Temporary helpers are removed after success or failure. Host-key verification uses the monitor's `known_hosts`, and key verification opens a fresh SSH connection rather than reusing a prior authenticated session.
+- **Optional Installer Override (`ExternalKeyBootstrap`)**: `MINDIE_TOP_BOOTSTRAP_COMMAND` (legacy alias `NFM_BOOTSTRAP_COMMAND`) replaces the built-in password installer when explicitly configured. Passwords arrive on `stdin`. Exit `0` confirms installation; exit `77` means authentication was rejected before any write and permits the next candidate. Other failures remain uncertain and are not replayed. **Passwords are never stored in SQLite tables, config files, CLI flags, helper files, receipts, or logs.**
 
 ---
 

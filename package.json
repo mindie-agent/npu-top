@@ -7,6 +7,7 @@
   },
   "scripts": {
     "dev": "vite",
+    "test": "node --test tests/onboarding.test.mjs",
     "build": "vite build",
     "lint": "eslint . --ignore-pattern npu_top/static --ignore-pattern dist"
   },

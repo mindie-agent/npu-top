@@ -190,6 +190,14 @@ select { min-height: 34px; padding: 6px 30px 6px 10px; border: 1px solid var(--b
 .modal > header { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 20px; }.modal h2 { margin-top: 3px; font-size: 21px; letter-spacing: -.03em; }.modal > header > button { display: grid; width: 32px; height: 32px; place-items: center; border: 0; border-radius: 8px; background: var(--surface-soft); font-size: 20px; }
 .modal form { display: grid; gap: 16px; }.modal label { display: grid; gap: 6px; font-size: 11px; font-weight: 750; }.modal label > span { color: var(--text-3); font-size: 10px; font-weight: 450; }.modal textarea, .modal input { width: 100%; padding: 11px 12px; border: 1px solid var(--border); border-radius: 9px; outline: 0; background: var(--surface-soft); font: 11px/1.6 "SFMono-Regular", Consolas, monospace; }.modal textarea { resize: vertical; }.modal textarea:focus, .modal input:focus { border-color: rgba(32,111,235,.5); box-shadow: 0 0 0 3px rgba(32,111,235,.08); }.modal--tags { width: min(520px, 100%); }.security-note { padding: 12px 14px; border-left: 3px solid var(--blue); border-radius: 7px; background: var(--surface-blue); }.security-note--priority { border-left-color: var(--orange); background: #fff8ec; }.security-note b { font-size: 10px; }.security-note p { margin-top: 4px; color: var(--text-2); font-size: 10px; line-height: 1.55; }.form-result { padding: 10px 12px; border-radius: 7px; color: #7c4e18; background: #fff7e8; font-size: 10px; }.modal form > footer { display: flex; justify-content: flex-end; gap: 8px; }
 
+.onboarding-results { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.onboarding-result { display: grid; gap: 4px; padding: 10px 12px; border-left: 3px solid var(--red); border-radius: 7px; background: var(--surface-soft); font-size: 11px; overflow-wrap: anywhere; }
+.onboarding-result strong { font-family: "SFMono-Regular", Consolas, monospace; }
+.onboarding-result span { color: var(--text-2); line-height: 1.6; white-space: pre-wrap; }
+.onboarding-result--success { border-left-color: var(--green); }
+.onboarding-result--warning { border-left-color: var(--orange); }
+.modal button:disabled, .modal textarea:disabled { cursor: wait; opacity: .65; }
+
 @media (max-width: 1240px) {
   .app-shell { grid-template-columns: 252px minmax(0, 1fr); }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
