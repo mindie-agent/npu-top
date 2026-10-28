@@ -3,7 +3,7 @@
 [Role] Parses and validates primary `MINDIE_TOP_*` environment variables (legacy `NFM_*` aliases remain accepted) into an immutable `Settings` dataclass.
 [Invariants] `MINDIE_TOP_*` takes precedence over `NFM_*`; malformed or out-of-range explicit settings raise `ValueError` instead of silently falling back to defaults.
 [Timeouts & Locks] Default `ssh_timeout=20s` exceeds inner `timeout 8` `npu-smi` commands; zero locks.
-[Side-Effect Policy] `prepare()` creates `state_dir`, `keys`, and `ssh-control` directories (`0o700`).
+[Side-Effect Policy] `prepare()` creates the monitor state directory (`0o700`); SSH state belongs to remote-dev.
 """
 from __future__ import annotations
 
@@ -58,12 +58,9 @@ class Settings:
     max_workers: int
     ssh_timeout: int
     hbm_busy_threshold_mb: int
-    # Optional host sources and credential bootstrap. All are explicit paths or
-    # commands supplied by the operator; nothing is discovered from the
-    # checkout location. See .env.example for the exact contract.
+    # Inventory is explicitly configured, never inferred from a checkout.
     inventory_files: tuple[Path, ...] = ()
     host_pool_files: tuple[Path, ...] = ()
-    bootstrap_command: str | None = None
 
     sqlite_max_mb: int = 1024
 
@@ -71,7 +68,6 @@ class Settings:
     def load(cls) -> "Settings":
         raw_state_dir = _env("MINDIE_TOP_STATE_DIR", "NFM_STATE_DIR")
         state_dir = Path(raw_state_dir or Path.cwd() / "data").expanduser().resolve()
-        bootstrap_command = (_env("MINDIE_TOP_BOOTSTRAP_COMMAND", "NFM_BOOTSTRAP_COMMAND") or "").strip() or None
         return cls(
             project_root=state_dir,
             state_dir=state_dir,
@@ -89,14 +85,8 @@ class Settings:
             ),
             inventory_files=_paths("MINDIE_TOP_INVENTORY_FILES", "NFM_INVENTORY_FILES"),
             host_pool_files=_paths("MINDIE_TOP_HOST_POOL_FILES", "NFM_HOST_POOL_FILES"),
-            bootstrap_command=bootstrap_command,
         )
 
     def prepare(self) -> None:
-        for directory in (
-            self.state_dir,
-            self.state_dir / "keys",
-            self.state_dir / "ssh-control",
-        ):
-            directory.mkdir(parents=True, exist_ok=True)
-            directory.chmod(0o700)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir.chmod(0o700)

@@ -9,7 +9,7 @@ flowchart TB
     Browser["🌐 Local Browser (127.0.0.1:8788)<br/>Live Dashboard · 90-Day Heatmaps · Batch Onboarding"]
     Agent["🤖 AI Agent (npu-top CLI / MCP)<br/>Instant Cache Screening · On-Demand Live Probes"]
     Core["⚙️ npu-top serve (Single Process)<br/>AdaptiveScheduler + Bounded SQLite WAL History"]
-    SSH["🔑 SshAccess (Dedicated Ed25519 Key + ControlPersist Multiplexing)"]
+    SSH["🔑 SshAccess → remote-dev shared authentication"]
     Host["🖥️ Bare-Metal Ascend NPU Hosts<br/>npu-smi · /proc/stat · df/findmnt · docker ps"]
 
     Browser -->|"Same-origin /api/*"| Core
@@ -24,13 +24,13 @@ flowchart TB
 
 Everything that talks to a remote host is wired together in `DeviceAdapter` (`npu_top/device_adapter.py`):
 
-- **Dedicated SSH Key & Isolated State (`SshAccess`)**: Manages a dedicated Ed25519 key pair and an isolated `known_hosts` file inside `NFM_STATE_DIR` without touching your personal `~/.ssh/config`.
+- **Shared SSH Authentication (`SshAccess`)**: Converts server records into remote-dev endpoints and uses its shared SSH launcher. A server stores `auth_ref`; credentials, key installation, and authentication policy belong to remote-dev. Existing monitor identity files remain usable but are no longer generated.
 - **Bundled `npu-smi` Parser (`npu_smi`)**: Parses `npu-smi info` and `npu-smi info -t usages` outputs directly with comprehensive unit tests covering 910B, A3 (910C), and A5 (950) layouts.
 - **Explicit Inventory Files**:
   - `NFM_INVENTORY_FILES`: JSON machine inventory files (`{"machines": [...]}`) providing display aliases and hardware tags.
   - `NFM_HOST_POOL_FILES`: Plain-text host lists (only the first column is read; any adjacent credential columns are ignored, and hosts found only in pool files automatically get the `低优先级` low-priority tag).
   - `npu-top` **never walks parent folders or Git directories to guess machine lists.**
-- **Zero-Plaintext Key Onboarding (`ExternalKeyBootstrap`)**: When `NFM_BOOTSTRAP_COMMAND` is configured, batch onboarding pipes one-time password candidates over `stdin` in memory to install the monitor's public key. **Passwords are never stored in SQLite tables, config files, CLI flags, or logs.**
+- **One Credential Owner**: Batch onboarding accepts an existing `auth_ref` or one password to import through remote-dev. Remote-dev owns the shared local secret file, defaulting to `~/.mindie/ssh/credentials.json`, without an OS keychain prompt. The monitor persists only the returned reference. A reference from another user or machine must be available to this service before registration is ready; it never triggers a second credential store. Password candidates and external bootstrap commands are no longer used.
 
 ---
 
@@ -62,7 +62,7 @@ Because a monitoring snapshot can become outdated the moment another user starts
   2. AICore utilization is above `1%`;
   3. HBM usage exceeds `NFM_HBM_BUSY_THRESHOLD_MB` (default `8192 MB`). Why 8 GB? Because idle A3 (910C) cards hold roughly 6 GB of resident driver HBM per card — setting the fallback threshold at 8192 MB catches hidden cross-container memory usage without falsely marking idle A3 cards as busy.
 - **No Overlapping Cycles & Cross-Platform SSH**:
-  A new polling cycle is scheduled only after the previous cycle finishes, preventing SSH backlog buildup. On Linux and macOS, `ControlPersist` reuses authenticated SSH sockets under a short path; on native Windows, unsupported Unix-domain socket options are omitted automatically, while local state directories (`0700`), SSH keys (`0600`), and atomic `os.replace` file updates avoid extra Windows ACL ceremonies.
+  A new polling cycle starts after the previous cycle finishes, preventing SSH backlog. Probes use remote-dev's platform transport with its complete authentication environment. Probe connections disable key repair so scheduled observation cannot modify remote authorization files.
 
 ---
 

@@ -30,7 +30,7 @@
 - **免装远端插件，通吃主流昇腾卡型**：直接在物理宿主机上运行 `npu-smi` 跨容器透视设备占用，内置解析器完整适配 **单 Die（910B 类）**、**双 Die（A3 / 910C 类）** 和 **Ascend 950（A5）**。
 - **平时省资源，看面板时秒级刷新**：你在浏览器打开看板时支持 1s / 5s / 10s / 30s 实时刷新；关掉网页后自动降频到 120s 后台巡检，绝不给服务器添乱。
 - **90 天历史趋势与热力图，磁盘占用有上限**：自动保存 15 分钟粒度的历史数据，展示 CPU、内存、NPU、HBM 和逐卡 AICore 热力图；同时把 SQLite 数据库严格限制在 `1024 MB` 以内（可通过 `NFM_SQLITE_MAX_MB` 调整），满了自动清理最老的数据，绝不撑爆你的本地硬盘。
-- **密码只过内存、绝不落盘**：批量添加机器时，密码只用于当次在内存里自动安装专用 Ed25519 公钥，绝不写进数据库、配置文件或日志。
+- **一次配置，共享认证**：与 remote-dev、coordinator 共用同一套 SSH 认证。密码由 remote-dev 保存到当前用户的本地私有文件，允许公钥时自动安装；仅支持密码的主机也能持续采集。监控数据库只保存认证引用。
 - **给 AI 助手配好现成的查卡工具（CLI + MCP）**：内置 5 个只读 MCP 工具和同名 CLI 命令。AI 助手不用自己拼 SSH 命令、更不用碰你的服务器密码，就能秒查哪台机器有空卡、哪个盘能放权重。
 
 > [!IMPORTANT]
@@ -42,7 +42,7 @@ flowchart LR
     User["👀 开发者浏览器 & 🤖 AI 编程助手"]
     Server["⚡ npu-top serve (127.0.0.1:8788)<br/>内存实时缓存 + 有界 SQLite 历史库"]
     MCP["🔌 npu-top CLI / MCP<br/>(5 个只读查卡工具)"]
-    SSH["🔑 专用 Ed25519 密钥 + SSH 连接复用"]
+    SSH["🔑 remote-dev 共享 SSH 认证"]
     Hosts["🖥️ 多台昇腾 NPU 裸机服务器<br/>(910B / A3 910C / A5 950)"]
 
     User -->|"打开看板 / 查热力图"| Server
@@ -200,7 +200,8 @@ npu-top mounts 192.0.2.21 --live
 - **单机故障隔离，绝不连累全局看板**：当某台昇腾服务器 SSH 超时、断网或不可达时，`npu-top` 会将该主机标记为 `error` 并附带具体诊断信息，同时其余在线机器的实时采样与看板展示照常运行。
 - **容器与进程归属降级不丢卡指标（`container_lookups_degraded`）**：如果宿主机上 Docker 响应超时或部分容器 PID 映射失败，采集器仍会完整保留已拿到的 `npu-smi` 算力与 HBM 显存指标，仅在状态中显式标注 `container_lookups_degraded`（绝不把过期的进程详情冒充为本次最新结果）。
 - **90 天历史数据自动滚动清理**：本地 SQLite 数据库按 90 天窗口（`NFM_RETENTION_DAYS=90`）与 `1024 MB` 体积上限（`NFM_SQLITE_MAX_MB=1024`）自动淘汰最旧的历史聚点与热力图数据；若发现已有数据库文件损坏，会保留原文件现场并直接报错，绝不静默清空。
-- **清单校验与免密引导安全边界**：显式配置的机器清单（`NFM_INVENTORY_FILES`）若缺失或格式损坏会直接报错阻止启动；首次批量免密安装 SSH 公钥时严格区分“未开始”、“已完成”与“断连后结果不确定（`unknown`）”，且密码仅走内存管道、绝不写入回执或日志。
+- **清单与认证边界**：显式配置的机器清单（`NFM_INVENTORY_FILES`）若缺失或格式损坏会直接报错阻止启动。主机的 `auth_ref` 必须能在当前服务用户的 remote-dev 凭据配置中解析；引用不可用时显示未就绪，不会创建另一套密码。常规采集只读，公钥安装只在显式添加凭据时由 remote-dev 执行。
+- **共享密码文件**：默认保存于 `~/.mindie/ssh/credentials.json`，可用 `REMOTE_DEV_AUTH_DIR` 修改共享目录，或用 `REMOTE_DEV_CREDENTIAL_FILE` 指定密码文件。密码以明文保存在用户私有目录中；POSIX 目录和文件权限分别为 `0700`、`0600`。各 agent 和监控服务应使用同一用户及同一配置，后续 SSH 自动读取该文件，不需要输入系统解锁密码。
 
 ## 配置参数一览
 
@@ -208,10 +209,9 @@ npu-top mounts 192.0.2.21 --live
 
 | 环境变量 | 默认值 | 它用来干什么 |
 | --- | --- | --- |
-| `NFM_STATE_DIR` | `./data` | 本地存放 SQLite 数据库、专用 SSH 密钥、`known_hosts` 和连接套接字的目录 |
+| `NFM_STATE_DIR` | `./data` | 本地监控 SQLite 数据库目录；共享 SSH 认证由 remote-dev 管理 |
 | `NFM_INVENTORY_FILES` | 未设置 | 启动时自动导入的 JSON 机器清单路径（多个文件用系统路径分隔符隔开） |
 | `NFM_HOST_POOL_FILES` | 未设置 | 纯文本主机池文件路径（每行取第 1 列地址）；只出现在这里的机器会自动打上 `低优先级` 标签 |
-| `NFM_BOOTSTRAP_COMMAND` | 未设置 | 可选的首次免密引导命令模板（密码通过内存 `stdin` 传入以安装公钥，绝不落盘） |
 | `NFM_HBM_BUSY_THRESHOLD_MB` | `8192` | HBM 显存判忙阈值（默认 8192 MB，专门避开 A3 机器空载时约 6 GB 的驱动常驻显存） |
 | `NFM_SQLITE_MAX_MB` | `1024` | 本地 SQLite 历史数据库最大体积上限（单位 MB，最小 16），到 85% 自动清理最旧数据 |
 | `NFM_RETENTION_DAYS` | `90` | 历史趋势与热力图数据最多保留多少天 |
@@ -253,8 +253,10 @@ npu-top/
 
 ## 本地开发与测试
 
+共享认证开发版本需要同级目录的 remote-dev 源码；一起安装以验证组件依赖兼容性。
+
 ```bash
-python3 -m pip install .
+python3 -m pip install ../remote-dev .
 python3 -m unittest discover -s tests -v
 npm ci && npm run lint && npm run build
 ```

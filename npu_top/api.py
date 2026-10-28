@@ -3,7 +3,7 @@
 [Role] Serves observation-only REST endpoints (`/api/health`, `/api/overview`, `/api/agent/*`, `/api/servers`, `/api/history`) and bundled web UI.
 [Invariants] Refuses non-loopback bind addresses; stamps `/api/*` responses with `X-MindIE-Top-Contract: observation-only`; distinguishes `completed`, `failed`, and `unknown` registration/bootstrap stages.
 [Timeouts & Locks] Delegates live collection waits (`timeout` up to `60s`) to `AdaptiveScheduler` and closes thread-local SQLite connections per request thread.
-[Side-Effect Policy] Loopback HTTP serving, SQLite server registry updates, and explicit SSH public-key bootstrap on `/api/servers/batch`.
+[Side-Effect Policy] Loopback HTTP serving, SQLite server registry updates, and shared remote-dev credential setup on `/api/servers/batch`.
 """
 from __future__ import annotations
 
@@ -58,8 +58,6 @@ class App:
         self.settings = settings
         self.db = db
         self.adapter = adapter
-        if isinstance(self.adapter, DeviceAdapter):
-            self.adapter.bootstrap_state = db
         self.scheduler = scheduler
         self.web_root = static_dir()
         self.inventory_state: dict[str, Any] = {"state": "not_configured"}
@@ -483,8 +481,14 @@ class Handler(BaseHTTPRequestHandler):
         passwords = body.get("passwords") or []
         if not isinstance(entries, list) or not entries or len(entries) > 200:
             raise ValueError("servers 必须包含 1 到 200 个条目")
-        if not isinstance(passwords, list) or len(passwords) > 20 or not all(isinstance(item, str) for item in passwords):
-            raise ValueError("passwords 最多包含 20 个字符串候选")
+        if not isinstance(passwords, list) or len(passwords) > 1 or not all(isinstance(item, str) for item in passwords):
+            raise ValueError("每次注册只接受一个密码；请分别添加使用不同密码的主机")
+        password = body.get("password")
+        if password is not None and not isinstance(password, str):
+            raise ValueError("password 必须为字符串")
+        if password is not None and passwords:
+            raise ValueError("password 与 passwords 不能同时提供")
+        password = password if password is not None else (passwords[0] if passwords else None)
         results = []
         for index, entry in enumerate(entries):
             receipt = {"input_index": index, "server": None, "registration": "not_started",
@@ -497,20 +501,27 @@ class Handler(BaseHTTPRequestHandler):
                 port = int(entry.get("port", 22))
                 username = str(entry.get("username", "root")).strip()
                 self.app.adapter.validate_endpoint(host, port, username)
+                auth_ref = entry.get("auth_ref")
+                if auth_ref is not None and (not isinstance(auth_ref, str) or not auth_ref.strip()):
+                    raise ValueError("auth_ref 必须为非空字符串")
                 tags = normalize_tags(entry.get("tags", []))
                 stage = "register"
                 server = self.app.db.upsert_server({
                     "id": uuid.uuid4().hex, "name": str(entry.get("name") or host).strip()[:120],
-                    "host": host, "port": port, "username": username, "tags": tags,
+                    "host": host, "port": port, "username": username, "tags": tags, "auth_ref": auth_ref,
                 })
                 receipt.update(server=server, registration="completed")
                 stage = "bootstrap"
                 with get_recorder("npu-top").operation("top.server.bootstrap") as operation:
-                    auth = self.app.adapter.bootstrap_with_passwords(server, passwords)
+                    auth = self.app.adapter.connect(server, password=password)
                     receipt["auth"] = auth
                     if not auth["ok"]:
                         operation.fail("bootstrap_failed", detail=auth.get("error"))
                 if auth["ok"]:
+                    if auth.get("auth_ref") and auth["auth_ref"] != server.get("auth_ref"):
+                        stage = "record_auth_ref"
+                        self.app.db.update_server(server["id"], auth_ref=auth["auth_ref"])
+                        server["auth_ref"] = auth["auth_ref"]
                     stage = "schedule_observation"
                     self.app.scheduler.collect_now(server["id"])
                 else:

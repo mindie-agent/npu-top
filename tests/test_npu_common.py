@@ -6,6 +6,7 @@ import json
 import subprocess
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from npu_top.npu_smi import parse_npu_common
@@ -91,8 +92,8 @@ class FakeAdapter:
     def preflight(self, server):
         return {"ok": True, "category": "ssh_config_valid", "error": None}
 
-    def ssh_base(self, server, *, batch_mode=True):
-        return []
+    def launch(self, server, command, *, timeout_ms):
+        return SimpleNamespace(argv=list(command), env=None)
 
     def parse_npu(self, info, usages):
         return {"devices": copy.deepcopy(self.devices), "process_records": []}

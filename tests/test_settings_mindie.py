@@ -28,7 +28,6 @@ class MindieTopSettingsTests(unittest.TestCase):
         self.assertEqual(settings.ssh_timeout, 20)
         self.assertEqual(settings.sqlite_max_mb, 1024)
         self.assertEqual(settings.hbm_busy_threshold_mb, 8192)
-        self.assertIsNone(settings.bootstrap_command)
         self.assertEqual(settings.inventory_files, ())
         self.assertEqual(settings.host_pool_files, ())
 
@@ -36,14 +35,12 @@ class MindieTopSettingsTests(unittest.TestCase):
         settings = load({
             "NFM_BIND": "::1", "NFM_PORT": "9001", "NFM_HISTORY_INTERVAL_SECONDS": "15",
             "NFM_RETENTION_DAYS": "7", "NFM_SSH_TIMEOUT_SECONDS": "12",
-            "NFM_BOOTSTRAP_COMMAND": "bootstrap {host}",
         })
         self.assertEqual(settings.bind, "::1")
         self.assertEqual(settings.port, 9001)
         self.assertEqual(settings.history_interval, 15)
         self.assertEqual(settings.retention_days, 7)
         self.assertEqual(settings.ssh_timeout, 12)
-        self.assertEqual(settings.bootstrap_command, "bootstrap {host}")
 
     def test_mindie_top_names_take_precedence_over_legacy(self) -> None:
         settings = load({
@@ -51,13 +48,11 @@ class MindieTopSettingsTests(unittest.TestCase):
             "MINDIE_TOP_PORT": "9100", "NFM_PORT": "9001",
             "MINDIE_TOP_HISTORY_INTERVAL_SECONDS": "45", "NFM_HISTORY_INTERVAL_SECONDS": "15",
             "MINDIE_TOP_MAX_WORKERS": "3", "NFM_MAX_WORKERS": "12",
-            "MINDIE_TOP_BOOTSTRAP_COMMAND": "primary {host}", "NFM_BOOTSTRAP_COMMAND": "legacy {host}",
         })
         self.assertEqual(settings.bind, "localhost")
         self.assertEqual(settings.port, 9100)
         self.assertEqual(settings.history_interval, 45)
         self.assertEqual(settings.max_workers, 3)
-        self.assertEqual(settings.bootstrap_command, "primary {host}")
 
     def test_primary_value_does_not_silently_fall_back_when_invalid(self) -> None:
         with self.assertRaisesRegex(ValueError, "MINDIE_TOP_PORT"):

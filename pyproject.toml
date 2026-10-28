@@ -4,12 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "npu-top"
-version = "0.2.1"
+version = "0.3.0.dev0"
 description = "Local-only Ascend NPU fleet monitor"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
-dependencies = ["mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@fba07e8607ddadde14cea315c9dbda23726c1c79"]
+dependencies = [
+    "mindie-diagnostics @ git+https://github.com/mindie-agent/diagnostics@5ae643e19223f2181ecdbaa3edaf464137c4805e",
+    "remote-dev>=0.11.0.dev0,<0.12",
+]
 authors = [{ name = "vllm-ascend-workspace" }]
 
 [project.scripts]

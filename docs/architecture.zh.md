@@ -9,7 +9,7 @@ flowchart TB
     Browser["🌐 本地浏览器 (127.0.0.1:8788)<br/>实时看板 · 90 天热力图 · 批量加机器"]
     Agent["🤖 AI 助手 (npu-top CLI / MCP)<br/>cache 秒读缓存 · live 按需实时刷新"]
     Core["⚙️ npu-top serve 单进程后端<br/>AdaptiveScheduler 自适应调度 + SQLite WAL 历史库"]
-    SSH["🔑 SshAccess (专用 Ed25519 密钥 + ControlPersist 连接复用)"]
+    SSH["🔑 SshAccess → remote-dev 共享认证"]
     Host["🖥️ 远端昇腾裸机宿主机<br/>npu-smi · /proc/stat · df/findmnt · docker ps"]
 
     Browser -->|"同源 /api/*"| Core
@@ -24,13 +24,13 @@ flowchart TB
 
 所有跟远端服务器打交道的逻辑都集中在 `DeviceAdapter`（`npu_top/device_adapter.py`）里，结构清晰、互不耦合：
 
-- **专用 SSH 密钥与独立配置（`SshAccess`）**：监控台自动生成并管理自己专属的 Ed25519 密钥和独立的 `known_hosts` 文件，不会乱改你个人的 `~/.ssh/config`。
+- **共享 SSH 认证（`SshAccess`）**：将监控主机转换成 remote-dev endpoint，并复用其 SSH 启动器。监控数据库保存 `auth_ref`；凭据、公钥安装和认证策略统一属于 remote-dev。已有监控密钥文件仍可使用，但不再生成新的独立密钥。
 - **内置零依赖解析器（`npu_smi`）**：自带经过完整单元测试验证的 `npu-smi info` 与 `npu-smi info -t usages` 解析器，支持 910B、A3 (910C) 和 A5 (950)。
 - **明确的机器清单导入**：
   - `NFM_INVENTORY_FILES`：导入 JSON 格式的常用机器清单（提供机器别名与硬件标签）。
   - `NFM_HOST_POOL_FILES`：导入纯文本主机池列表（只读每行第一列 IP/主机名，忽略后面的密码列；只出现在主机池里的机器会自动打上 `低优先级` 标签）。
   - `npu-top` **绝不会自己去翻你的父目录或 Git 仓库猜机器列表**。
-- **内存级安全免密引导（`ExternalKeyBootstrap`）**：如果配置了 `NFM_BOOTSTRAP_COMMAND`，批量添加机器时输入的密码只会通过内存 `stdin` 传给引导命令去装公钥，**任何数据库表、配置文件和日志里都绝不存密码**。
+- **统一凭据管理**：批量添加主机时接受已有 `auth_ref`，或将一个密码交由 remote-dev 导入。remote-dev 统一管理本地密码文件，默认路径为 `~/.mindie/ssh/credentials.json`，不需要系统钥匙串解锁。监控台只保存返回的引用。其他机器或用户的引用在当前服务不可解析时明确显示未就绪，不创建第二套凭据；不再遍历候选密码或运行外部公钥引导命令。
 
 ---
 
@@ -62,7 +62,7 @@ flowchart TB
   2. 卡的 AICore 利用率超过 `1%`；
   3. 卡的 HBM 显存占用超过了兜底阈值（默认 `8192 MB`）。为什么默认设在 8 GB？因为实测 A3 (910C) 服务器在完全空载时，每张卡的底层驱动也会常驻占用约 6 GB HBM——设成 8192 MB 既能抓出跨容器隐藏的显存占用，又不会把空载的 A3 机器误判成全忙！
 - **绝不堆积请求 & 跨平台兼容**：
-  上一轮探测全部跑完后才会安排下一轮，哪怕网络慢也绝不会堆积一堆并发 SSH 进程。在 Linux/macOS 上使用短路径 `ControlPersist` 复用 SSH 连接；在原生 Windows 上会自动跳过不支持的 Unix 域套接字参数，本地状态目录（`0700`）、SSH 密钥权限（`0600`）与配置文件原子替换均统一使用 `os.replace`，不再引入额外的 Windows ACL 权限流程。
+  上一轮探测完成后才安排下一轮，避免堆积 SSH 进程。采集复用 remote-dev 的跨平台启动器及完整认证环境，并关闭公钥修复；定时采集不会改写远端授权文件。
 
 ---
 

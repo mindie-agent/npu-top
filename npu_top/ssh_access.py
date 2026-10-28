@@ -1,24 +1,58 @@
-"""OpenSSH access for host probes: dedicated key, known_hosts, base command.
+"""Shared remote-dev authentication for read-only monitor probes.
 
-[Role] Manages the monitor-owned Ed25519 keypair, isolated `known_hosts`, and OpenSSH command construction.
-[Invariants] Distinguishes `completed`, `not_started` (`authentication_rejected`), and `unknown` key-installation outcomes so uncertain remote writes are never replayed.
-[Timeouts & Locks] `ssh-keygen` bounded to `15s`, `ssh -G` preflight to `8s`, key auth check to `12s`, key install to `15s` (`ConnectTimeout=8`).
-[Side-Effect Policy] Local key generation under `state_dir/keys` and explicit `~/.ssh/authorized_keys` append during bootstrap.
+[Role] Maps monitor records to remote-dev endpoints and its shared SSH launcher.
+[Invariants] Credential references resolve in the local user's shared store; probes never install keys or create a second password store.
+[Timeouts & Locks] SSH config validation is bounded to 8s, access checks to 12s, and explicit credential setup to 30s.
+[Side-Effect Policy] Probes are read-only; explicit password onboarding delegates key installation and credential persistence to remote-dev.
 """
-
 from __future__ import annotations
 
-import os
 import re
-import shlex
 import subprocess
-from dataclasses import dataclass
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
+
+from remote_dev import auth
+from remote_dev.core.endpoint import Endpoint
+from remote_dev.core.errors import RemoteExecutionError
+from remote_dev.core.ssh_transport import RemoteCompleted, capture_launch, ssh_launch
 
 
 HOST_PATTERN = re.compile(r"^[A-Za-z0-9_.:\-]+$")
 USER_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]+$")
+
+
+def capture_ssh(access, server, command, *, timeout_ms, input=None, config_only=False) -> RemoteCompleted:
+    """Keep plan preparation and its owned SSH process inside one probe budget."""
+    started = time.monotonic()
+    plan = access.launch(server, command, timeout_ms=timeout_ms)
+    if config_only:
+        plan.argv.insert(1, "-G")
+    remaining_ms = int(timeout_ms - (time.monotonic() - started) * 1000)
+    if remaining_ms <= 0:
+        raise RemoteExecutionError(
+            "SSH plan preparation exhausted the probe deadline",
+            category="authentication_timeout", submission_state="not_sent",
+        )
+    result = capture_launch(plan, input=input, timeout_ms=remaining_ms)
+    if result.timed_out:
+        error = subprocess.TimeoutExpired(result.args, timeout_ms / 1000,
+                                          output=result.stdout, stderr=result.stderr)
+        error.cleanup_error = result.cleanup_error
+        raise error
+    completed = RemoteCompleted(
+        result.returncode, result.stdout.decode("utf-8", errors="replace"),
+        result.stderr.decode("utf-8", errors="replace"),
+        cancelled=result.cancelled, cleanup_error=result.cleanup_error,
+    )
+    if result.cancelled:
+        error = RemoteExecutionError("SSH observation cancelled", category="cancelled",
+                                     submission_state="acknowledged" if result.returncode is not None else "uncertain")
+        error.completed = completed
+        error.cleanup_error = result.cleanup_error
+        raise error
+    return completed
 
 
 def validate_endpoint(host: str, port: int, username: str) -> None:
@@ -30,186 +64,76 @@ def validate_endpoint(host: str, port: int, username: str) -> None:
         raise ValueError("SSH 端口必须在 1 到 65535 之间")
 
 
-@dataclass(frozen=True)
-class KeyInstallResult:
-    state: str
-    error: str | None = None
-    authentication_rejected: bool = False
-    receipt: dict[str, Any] | None = None
-    recording_error: str | None = None
-
-
 class SshAccess:
-    """Monitor-owned SSH identity and command construction."""
-
-    def __init__(self, state_dir: Path, working_dir: Path, *, is_windows: bool | None = None) -> None:
+    def __init__(self, state_dir: Path, working_dir: Path) -> None:
         self.state_dir = state_dir
-        # ssh runs with this cwd so the relative ControlPath stays short enough
-        # for the Unix-domain socket path limit even in deeply nested checkouts.
         self.working_dir = working_dir
-        self.is_windows = os.name == "nt" if is_windows is None else is_windows
-        self._key_permissions_ready = False
 
     validate_endpoint = staticmethod(validate_endpoint)
 
-    @property
-    def private_key(self) -> Path:
-        return self.state_dir / "keys" / "id_ed25519"
-
-    @property
-    def public_key(self) -> Path:
-        return self.private_key.with_suffix(".pub")
-
-    @property
-    def known_hosts(self) -> Path:
-        return self.state_dir / "known_hosts"
-
-    def ensure_key(self) -> Path:
-        if self.private_key.exists() and self.public_key.exists():
-            self._secure_key_permissions()
-            return self.private_key
-        self.private_key.parent.mkdir(parents=True, exist_ok=True)
-        if self.private_key.exists() and not self.public_key.exists():
-            derived = subprocess.run(
-                ["ssh-keygen", "-y", "-f", str(self.private_key)],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=15,
-                check=False,
-            )
-            if derived.returncode == 0 and derived.stdout.strip():
-                self.public_key.write_text(derived.stdout, encoding="utf-8")
-                self._secure_key_permissions()
-                return self.private_key
-            self.private_key.unlink(missing_ok=True)
-        if self.public_key.exists() or self.public_key.is_symlink():
-            self.public_key.unlink(missing_ok=True)
-        result = subprocess.run(
-            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "npu-fleet-monitor", "-f", str(self.private_key)],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=15,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise RuntimeError((result.stderr or "ssh-keygen failed")[-1000:])
-        self._secure_key_permissions()
-        return self.private_key
-
-    def _secure_key_permissions(self) -> None:
-        if self._key_permissions_ready:
-            return
-        self.private_key.chmod(0o600)
-        if self.public_key.exists():
-            self.public_key.chmod(0o600)
-        self._key_permissions_ready = True
-
-    def ssh_base(self, server: dict[str, Any], *, batch_mode: bool = True) -> list[str]:
+    def endpoint(self, server: dict[str, Any]) -> Endpoint:
         validate_endpoint(server["host"], int(server["port"]), server["username"])
-        self.ensure_key()
-        command = [
-            "ssh", "-T",
-            "-o", f"BatchMode={'yes' if batch_mode else 'no'}",
-            "-o", "StrictHostKeyChecking=accept-new",
-            "-o", f"UserKnownHostsFile={self.known_hosts}",
-            "-o", "LogLevel=ERROR",
-            "-o", "ConnectTimeout=8",
-            "-o", "ConnectionAttempts=1",
-            "-o", "ServerAliveInterval=10",
-            "-o", "ServerAliveCountMax=1",
-        ]
-        if not self.is_windows:
-            control_path = Path("ssh-control") / "%C"
-            command.extend([
-                "-o", "ControlMaster=auto",
-                "-o", "ControlPersist=90",
-                "-o", f"ControlPath={control_path}",
-            ])
-        command.extend([
-            "-i", str(self.private_key),
-            "-o", "IdentitiesOnly=yes",
-            "-p", str(server["port"]),
-            f"{server['username']}@{server['host']}",
-        ])
-        return command
+        endpoint = Endpoint(
+            host=server["host"], port=int(server["port"]), user=server["username"],
+            auth_ref=server.get("auth_ref"),
+        )
+        if auth.ProfileStore().resolve(endpoint) is not None:
+            return endpoint
+        identity = None
+        # Existing monitor keys remain usable; new keys belong to remote-dev.
+        existing_key = self.state_dir / "keys" / "id_ed25519"
+        if existing_key.is_file():
+            identity = str(existing_key)
+        known_hosts = self.state_dir / "known_hosts"
+        return Endpoint(
+            host=server["host"], port=int(server["port"]), user=server["username"],
+            identity_file=identity, auth_ref=server.get("auth_ref"),
+            known_hosts_file=str(known_hosts) if known_hosts.is_file() else None,
+        )
+
+    def launch(
+        self, server: dict[str, Any], command: Sequence[str] | None = None,
+        *, timeout_ms: int | None = None,
+    ):
+        return ssh_launch(
+            self.endpoint(server), command, timeout_ms=timeout_ms, repair=False,
+        )
 
     def preflight(self, server: dict[str, Any]) -> dict[str, Any]:
-        validate_endpoint(server["host"], int(server["port"]), server["username"])
-        command = ["ssh", "-G", "-p", str(server["port"]), f"{server['username']}@{server['host']}"]
-        result = subprocess.run(
-            command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE, text=True, timeout=8, check=False,
-        )
+        try:
+            result = capture_ssh(self, server, None, timeout_ms=8000, config_only=True)
+        except RemoteExecutionError as exc:
+            return {"ok": False, "category": exc.category, "error": str(exc)}
         return {
             "ok": result.returncode == 0,
             "category": "ssh_config_valid" if result.returncode == 0 else "ssh_config_invalid",
             "error": None if result.returncode == 0 else (result.stderr or "SSH configuration rejected")[-1000:],
+            **({"cleanup_error": result.cleanup_error} if result.cleanup_error else {}),
         }
 
-    def check_key_auth(self, server: dict[str, Any]) -> tuple[bool, str | None]:
+    def connect(self, server: dict[str, Any], *, password: str | None = None) -> dict[str, Any]:
+        """Import a supplied password once, or verify the existing shared identity."""
         try:
-            result = subprocess.run(
-                [*self.ssh_base(server), "true"], stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
-                timeout=12, check=False, cwd=self.working_dir,
-            )
-        except (subprocess.TimeoutExpired, TimeoutError):
-            return False, "SSH 连接超时"
+            if password is not None:
+                configured = auth.setup_access(self.endpoint(server), password=password, timeout_ms=30000)
+                return {**configured, "ok": True}
+            result = capture_ssh(self, server, ["true"], timeout_ms=12000)
+        except RemoteExecutionError as exc:
+            return {
+                "ok": False, "state": "unknown" if exc.submission_state == "uncertain" else "not_ready",
+                "category": exc.category, "error": str(exc), "submission_state": exc.submission_state,
+                **({"bootstrap": exc.bootstrap} if hasattr(exc, "bootstrap") else {}),
+                **({"cleanup_error": exc.cleanup_error} if getattr(exc, "cleanup_error", None) else {}),
+            }
+        except (subprocess.TimeoutExpired, TimeoutError) as exc:
+            return {"ok": False, "state": "not_ready", "category": "connection_timeout", "error": "SSH 连接超时",
+                    **({"cleanup_error": exc.cleanup_error} if getattr(exc, "cleanup_error", None) else {})}
         except OSError as exc:
-            return False, f"本地 SSH 启动失败：{exc.strerror or type(exc).__name__}"
-        if result.returncode == 0:
-            return True, None
-        error = " ".join(result.stderr.split())[-500:]
-        if "Permission denied" not in error or "unix_listener:" in error:
-            return False, f"SSH 连接失败：{error or f'exit {result.returncode}'}"
-        return False, None
-
-    def _default_identity_base(self, server: dict[str, Any]) -> list[str]:
-        """ssh command that uses the invoking user's own default identities."""
-        validate_endpoint(server["host"], int(server["port"]), server["username"])
-        return [
-            "ssh", "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new",
-            "-o", f"UserKnownHostsFile={self.known_hosts}", "-o", "LogLevel=ERROR",
-            "-o", "ConnectTimeout=8", "-o", "ConnectionAttempts=1",
-            "-p", str(server["port"]), f"{server['username']}@{server['host']}",
-        ]
-
-    def install_key_with_default_identity(self, server: dict[str, Any]) -> KeyInstallResult:
-        """Preserve the write outcome separately from later key verification."""
-        try:
-            check = subprocess.run(
-                [*self._default_identity_base(server), "true"], stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=12, check=False,
-                cwd=self.working_dir,
-            )
-        except (subprocess.TimeoutExpired, TimeoutError, OSError) as exc:
-            return KeyInstallResult("not_started", f"默认身份连接检查失败：{type(exc).__name__}")
-        if check.returncode != 0:
-            error = " ".join(check.stderr.split())[-500:]
-            rejected = "Permission denied" in error
-            return KeyInstallResult("not_started", error or f"SSH exit {check.returncode}", rejected)
-        public_key = self.public_key.read_text(encoding="utf-8").strip()
-        quoted = shlex.quote(public_key)
-        remote = (
-            "umask 077; mkdir -p ~/.ssh && touch ~/.ssh/authorized_keys && "
-            "chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys && "
-            f"(grep -qxF {quoted} ~/.ssh/authorized_keys; code=$?; "
-            f"case $code in 0) ;; 1) printf '%s\\n' {quoted} >> ~/.ssh/authorized_keys ;; *) exit $code ;; esac)"
-        )
-        try:
-            install = subprocess.run(
-                [*self._default_identity_base(server), "sh", "-c", shlex.quote(remote)], stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=15, check=False,
-                cwd=self.working_dir,
-            )
-        except (subprocess.TimeoutExpired, TimeoutError):
-            return KeyInstallResult("unknown", "密钥安装超时；远端授权文件写入结果不确定，请先核对")
-        except OSError as exc:
-            return KeyInstallResult("not_started", f"无法启动密钥安装：{type(exc).__name__}")
-        if install.returncode == 0:
-            return KeyInstallResult("completed")
-        return KeyInstallResult("unknown", "密钥安装未获完整成功确认；请先核对远端授权文件")
+            return {"ok": False, "state": "not_ready", "category": "local_process", "error": f"SSH 启动失败：{exc.strerror or type(exc).__name__}"}
+        return {
+            "ok": result.returncode == 0,
+            "state": "ready" if result.returncode == 0 else "not_ready",
+            "auth_ref": server.get("auth_ref"),
+            "error": None if result.returncode == 0 else (result.stderr or f"SSH exit {result.returncode}")[-1000:],
+            **({"cleanup_error": result.cleanup_error} if result.cleanup_error else {}),
+        }

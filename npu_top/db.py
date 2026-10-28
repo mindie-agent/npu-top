@@ -1,7 +1,7 @@
-"""SQLite persistence for registered servers, bootstrap receipts, raw telemetry, and 15-minute metric rollups.
+"""SQLite persistence for registered servers, raw telemetry, and 15-minute metric rollups.
 
-[Role] Owns `monitor.sqlite3` schema, server registry, idempotent SSH bootstrap receipts, bounded raw device telemetry samples, and history rollups.
-[Invariants] Configures WAL + `busy_timeout=5000` + `max_page_count` once per thread-local connection; never replays `sending`/`unknown`/`completed` bootstrap receipts; raw samples only store observed fields.
+[Role] Owns `monitor.sqlite3` schema, server registry, bounded raw device telemetry samples, and history rollups.
+[Invariants] Configures WAL + `busy_timeout=5000` + `max_page_count` once per thread-local connection; stores only shared authentication references, never credentials.
 [Timeouts & Locks] Thread-local SQLite connections with `timeout=5.0`, `_write_lock` (`RLock`), and `_history_slots` (`BoundedSemaphore(2)`) with a `3s` progress-handler deadline.
 [Side-Effect Policy] Local SQLite writes and bounded history pruning only; zero network I/O.
 """
@@ -13,7 +13,6 @@ import math
 import sqlite3
 import threading
 import time
-import uuid
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -37,14 +36,14 @@ CREATE TABLE IF NOT EXISTS servers (
   updated_at INTEGER NOT NULL,
   last_seen_at INTEGER,
   last_error TEXT,
-  bootstrap_receipt_json TEXT,
+  auth_ref TEXT,
   UNIQUE(host, port, username)
 );
 """
 
 HOST_METRICS = ("cpu_percent", "npu_util_percent", "memory_percent", "hbm_percent", "busy_npu_count")
 DEVICE_METRICS = ("utilization_percent", "hbm_percent", "busy_percent")
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 DEVICE_SAMPLES_TABLE = """
 CREATE TABLE IF NOT EXISTS device_samples (
@@ -202,9 +201,9 @@ class Database:
                 raise RuntimeError("Legacy history requires offline migrate-history.py before startup")
             connection.executescript(SCHEMA)
             columns = {row[1] for row in connection.execute("PRAGMA table_info(servers)")}
-            if "bootstrap_receipt_json" not in columns:
+            if "auth_ref" not in columns:
                 with connection:
-                    connection.execute("ALTER TABLE servers ADD COLUMN bootstrap_receipt_json TEXT")
+                    connection.execute("ALTER TABLE servers ADD COLUMN auth_ref TEXT")
             sample_columns = {row[1] for row in connection.execute("PRAGMA table_info(device_samples)")}
             if "sample_ts_ns" not in sample_columns:
                 self._migrate_device_samples(connection, sample_columns)
@@ -250,8 +249,7 @@ class Database:
         result = dict(row)
         result["enabled"] = bool(result["enabled"])
         result["tags"] = json.loads(result.pop("tags_json") or "[]")
-        receipt = result.pop("bootstrap_receipt_json", None)
-        result["bootstrap_receipt"] = json.loads(receipt) if receipt else None
+        result.pop("bootstrap_receipt_json", None)
         return result
 
     def list_servers(self) -> list[dict[str, Any]]:
@@ -268,14 +266,15 @@ class Database:
         with connection:
             connection.execute(
                 """
-                INSERT INTO servers(id, name, host, port, username, tags_json, enabled, created_at, updated_at)
-                VALUES(?, ?, ?, ?, ?, ?, 1, ?, ?)
+                INSERT INTO servers(id, name, host, port, username, tags_json, auth_ref, enabled, created_at, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                 ON CONFLICT(host, port, username) DO UPDATE SET
-                  name=excluded.name, tags_json=excluded.tags_json, enabled=1, updated_at=excluded.updated_at
+                  name=excluded.name, tags_json=excluded.tags_json,
+                  auth_ref=COALESCE(excluded.auth_ref, servers.auth_ref), enabled=1, updated_at=excluded.updated_at
                 """,
                 (
                     server["id"], server["name"], server["host"], server["port"], server["username"],
-                    json.dumps(server.get("tags", []), ensure_ascii=False), now, now,
+                    json.dumps(server.get("tags", []), ensure_ascii=False), server.get("auth_ref"), now, now,
                 ),
             )
             row = connection.execute(
@@ -290,6 +289,7 @@ class Database:
         *,
         enabled: bool | None = None,
         tags: list[str] | None = None,
+        auth_ref: str | None = None,
     ) -> bool:
         assignments = ["updated_at=?"]
         values: list[Any] = [int(time.time())]
@@ -299,6 +299,9 @@ class Database:
         if tags is not None:
             assignments.append("tags_json=?")
             values.append(json.dumps(tags, ensure_ascii=False))
+        if auth_ref is not None:
+            assignments.append("auth_ref=?")
+            values.append(auth_ref)
         values.append(server_id)
         connection = self.connection()
         with connection:
@@ -310,42 +313,6 @@ class Database:
         with connection:
             cursor = connection.execute("DELETE FROM servers WHERE id=?", (server_id,))
         return cursor.rowcount > 0
-
-    def bootstrap_receipt(self, server_id: str):
-        server = self.get_server(server_id)
-        if server is None:
-            raise ValueError("bootstrap server is not registered")
-        return server["bootstrap_receipt"]
-
-    def reserve_bootstrap(self, server_id: str, method: str, attempts: int):
-        with self._write_lock:
-            connection = self.connection()
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
-                receipt = self.bootstrap_receipt(server_id)
-                if receipt and receipt["state"] in {"sending", "unknown", "completed"}:
-                    return False, receipt
-                receipt = {
-                    "operation_id": uuid.uuid4().hex,
-                    "state": "sending",
-                    "method": method,
-                    "attempts": attempts,
-                    "at": int(time.time()),
-                }
-                connection.execute("UPDATE servers SET bootstrap_receipt_json=? WHERE id=?", (json.dumps(receipt), server_id))
-            return True, receipt
-
-    def finish_bootstrap(self, server_id: str, operation_id: str, state: str):
-        with self._write_lock:
-            connection = self.connection()
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
-                receipt = self.bootstrap_receipt(server_id)
-                if receipt is None or receipt["operation_id"] != operation_id:
-                    raise RuntimeError("bootstrap receipt identity changed; remote action was not repeated")
-                receipt = {**receipt, "state": state, "at": int(time.time())}
-                connection.execute("UPDATE servers SET bootstrap_receipt_json=? WHERE id=?", (json.dumps(receipt), server_id))
-            return receipt
 
     @staticmethod
     def _percent(used: Any, total: Any) -> float | None:

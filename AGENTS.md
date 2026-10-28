@@ -8,7 +8,7 @@ Local Ascend NPU fleet monitor, loopback HTTP console, compact CLI, and read-onl
 - **Loopback-Only Surface**: `AppServer` refuses non-loopback bind addresses (`127.0.0.1`, `::1`, `localhost`), and `VawsTopClient` bypasses environment proxies (`ProxyHandler({})`) while refusing remote URLs unless `MINDIE_TOP_ALLOW_REMOTE=1`.
 - **State Honesty & Idempotent Bootstrap**:
   - Storage failures in `AdaptiveScheduler` never erase completed probe snapshots or advance `_latest_persisted`.
-  - SSH key bootstrap receipts (`reserve_bootstrap` / `finish_bootstrap`) distinguish `completed`, `not_started` (exit `77` auth rejection), and `unknown` so uncertain remote `authorized_keys` writes are never replayed.
+  - SSH credentials and key installation belong to remote-dev. Its shared local secret file defaults to `~/.mindie/ssh/credentials.json`; do not introduce a monitor-owned store or OS keychain prompts. Store only `auth_ref`; an unresolved reference reports not-ready. Periodic probes disable remote key repair.
 
 ## 2. Module Map (`npu_top/`)
 
@@ -18,8 +18,8 @@ Local Ascend NPU fleet monitor, loopback HTTP console, compact CLI, and read-onl
 - `scheduler.py`: `AdaptiveScheduler` managing viewer-lease polling intervals (`1, 5, 10, 30s` active vs `idle_interval`) and bounded `collect_and_wait` live probes.
 - `probe.py`: `HostProbe` executing single-roundtrip SSH shell probes (`/proc`, `npu-smi`, `df`, `findmnt`, `docker`, process details) and parsing host/container/owner metadata.
 - `npu_smi.py` & `npu_single_id.py`: Bundled parsers for Ascend A2 (910B single-die), A3 (910C dual-die with `Phy-ID`), 310P, and A5 (Ascend950 single-ID) `npu-smi info` and `-t usages` outputs.
-- `ssh_access.py`, `device_adapter.py`, `inventory.py`: Monitor-owned Ed25519 SSH identity, `MachineInventoryFile` / `HostPoolFile` loaders, and `ExternalKeyBootstrap`.
-- `db.py`: Thread-local WAL SQLite store (`monitor.sqlite3`) for server registry, bootstrap receipts, and 15-minute host/device metric rollups with hard capacity pruning.
+- `ssh_access.py`, `device_adapter.py`, `inventory.py`: remote-dev endpoint/authentication adapter and explicit `MachineInventoryFile` / `HostPoolFile` loaders.
+- `db.py`: Thread-local WAL SQLite store (`monitor.sqlite3`) for server registry/auth references and 15-minute host/device metric rollups with hard capacity pruning.
 - `agent_view.py`: Pure projection functions producing `observation`-enveloped payloads and ranking idle capacity candidates.
 - `settings.py`, `observability.py`, `static_files.py`: `NFM_*` environment validation, `mindie_diagnostics` instrumentation, and frontend asset resolution.
 

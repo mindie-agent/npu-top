@@ -15,9 +15,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+from remote_dev.core.ssh_transport import RemoteCompleted
+
 from . import dcmi_telemetry
 from .device_adapter import DeviceAdapter
 from .npu_smi import parse_npu_common
+from .ssh_access import capture_ssh
 
 
 SECTION = "__NFM_SECTION__"
@@ -413,6 +416,11 @@ def is_device_busy(device: dict[str, Any], hbm_threshold_mb: int) -> bool:
     )
 
 
+def _cleanup_facts(result) -> dict[str, str]:
+    error = getattr(result, "cleanup_error", None)
+    return {"cleanup_error": error} if error else {}
+
+
 class HostProbe:
     def __init__(self, adapter: DeviceAdapter, timeout: int, hbm_busy_threshold_mb: int = 8192) -> None:
         self.adapter = adapter
@@ -423,36 +431,23 @@ class HostProbe:
         self._process_cache: dict[str, dict[int, dict[str, Any]]] = {}
         self._preflighted: set[str] = set()
 
-    def _run_script(self, server: dict[str, Any], script: str, timeout: int) -> subprocess.CompletedProcess[str]:
+    def _run_script(self, server: dict[str, Any], script: str, timeout: int) -> RemoteCompleted:
         # Text-mode stdin translates LF to CRLF on Windows, which corrupts
         # shell options and heredocs. Keep the SSH wire format UTF-8 bytes.
-        result = subprocess.run(
-            [*self.adapter.ssh_base(server), "bash", "-s"],
+        return capture_ssh(
+            self.adapter, server, ["bash", "-s"], timeout_ms=timeout * 1000,
             input=script.replace("\r\n", "\n").encode("utf-8"),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=timeout, check=False, cwd=self.adapter.project_root,
-        )
-        return subprocess.CompletedProcess(
-            result.args, result.returncode,
-            result.stdout.decode("utf-8", errors="replace"),
-            result.stderr.decode("utf-8", errors="replace"),
         )
 
     def _run_python(
         self, server: dict[str, Any], source: str, args: list[str], timeout: int,
-    ) -> subprocess.CompletedProcess[str]:
+    ) -> RemoteCompleted:
         """Bound the remote getter before the SSH deadline (no remote file write)."""
-        result = subprocess.run(
-            [*self.adapter.ssh_base(server), "timeout", "--signal=TERM", "--kill-after=1",
-             str(max(1, timeout - 3)), "python3", "-", *args],
+        return capture_ssh(
+            self.adapter, server, ["timeout", "--signal=TERM", "--kill-after=1",
+                     str(max(1, timeout - 3)), "python3", "-", *args],
+            timeout_ms=timeout * 1000,
             input=source.replace("\r\n", "\n").encode("utf-8"),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=timeout, check=False, cwd=self.adapter.project_root,
-        )
-        return subprocess.CompletedProcess(
-            result.args, result.returncode,
-            result.stdout.decode("utf-8", errors="replace"),
-            result.stderr.decode("utf-8", errors="replace"),
         )
 
     def _collect_process_details(self, server: dict[str, Any], pids: list[int]) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
@@ -461,10 +456,11 @@ class HostProbe:
         try:
             result = self._run_script(server, build_process_detail_script(pids), min(self.timeout, 15))
         except (TimeoutError, OSError, subprocess.TimeoutExpired) as exc:
-            return {}, {"state": "unavailable", "stage": "process_details", "error_type": type(exc).__name__}
+            return {}, {"state": "unavailable", "stage": "process_details", "error_type": type(exc).__name__,
+                        **_cleanup_facts(exc)}
         if result.returncode != 0:
             return {}, {"state": "unavailable", "stage": "process_details", "exit_code": result.returncode,
-                        "error": (result.stderr or "process detail probe failed")[-800:]}
+                        "error": (result.stderr or "process detail probe failed")[-800:], **_cleanup_facts(result)}
         sections = split_sections(result.stdout)
         if "process_details" not in sections:
             return {}, {"state": "unavailable", "stage": "process_details", "error": "probe response missing process_details"}
@@ -473,7 +469,7 @@ class HostProbe:
         for detail in details.values():
             detail["details_observed_at"] = observed_at
         # A process can exit between the device sample and /proc lookup.
-        return details, {"state": "observed", "observed_at": observed_at}
+        return details, {"state": "observed", "observed_at": observed_at, **_cleanup_facts(result)}
 
     @staticmethod
     def _parse_frequency_sections(output: str) -> dict[int, dict[str, Any]]:
@@ -565,6 +561,7 @@ class HostProbe:
                 cards, parsed, "partial" if parsed else "unavailable",
                 error_type=type(exc).__name__, timed_out=True,
                 card_exit_codes=self._parse_frequency_exit_codes(output),
+                **_cleanup_facts(exc),
             )
         except OSError as exc:
             return {}, {"state": "unavailable", "stage": "npu_frequency",
@@ -576,8 +573,9 @@ class HostProbe:
                 "state": "unavailable", "stage": "npu_frequency",
                 "exit_code": result.returncode, "card_exit_codes": exit_codes,
                 "error": (result.stderr or result.stdout or "frequency query returned no common section")[-800:],
+                **_cleanup_facts(result),
             }
-        extra: dict[str, Any] = {"card_exit_codes": exit_codes}
+        extra: dict[str, Any] = {"card_exit_codes": exit_codes, **_cleanup_facts(result)}
         if result.returncode != 0:
             extra["exit_code"] = result.returncode
             extra["error"] = (result.stderr or "frequency probe exited nonzero")[-800:]
@@ -621,7 +619,7 @@ class HostProbe:
             )
         except (subprocess.TimeoutExpired, TimeoutError) as exc:
             return {"state": "unavailable", "stage": "dcmi",
-                    "error_type": type(exc).__name__, "timed_out": True}
+                    "error_type": type(exc).__name__, "timed_out": True, **_cleanup_facts(exc)}
         except OSError as exc:
             return {"state": "unavailable", "stage": "dcmi",
                     "error_type": type(exc).__name__, "error": str(exc)[-800:]}
@@ -630,6 +628,7 @@ class HostProbe:
                 "state": "unavailable", "stage": "dcmi",
                 "exit_code": result.returncode,
                 "error": (result.stderr or "DCMI helper failed")[-800:],
+                **_cleanup_facts(result),
             }
         try:
             payload = json.loads(result.stdout)
@@ -641,6 +640,7 @@ class HostProbe:
             return {"state": "unavailable", "stage": "dcmi",
                     "error_type": "InvalidPayload", "error": "DCMI helper returned non-object JSON"}
         payload["stage"] = "dcmi"
+        payload.update(_cleanup_facts(result))
         payload.setdefault("observed_at", int(time.time()))
         return payload
 
@@ -660,7 +660,8 @@ class HostProbe:
             result = self._run_script(server, script, effective_timeout)
         except (subprocess.TimeoutExpired, TimeoutError) as exc:
             timeout = getattr(exc, "timeout", effective_timeout)
-            raise RuntimeError(f"SSH 探查超时（{timeout:g}s）") from exc
+            cleanup = getattr(exc, "cleanup_error", None)
+            raise RuntimeError(f"SSH 探查超时（{timeout:g}s）" + (f"; cleanup: {cleanup}" if cleanup else "")) from exc
         if result.returncode != 0:
             raise RuntimeError((result.stderr or result.stdout or "SSH 探查失败")[-1200:])
         sections = split_sections(result.stdout)
@@ -756,6 +757,7 @@ class HostProbe:
             "process_details": detail_status,
             "frequency_probe": frequency_status,
             "dcmi": dcmi_status,
+            **({"transport": _cleanup_facts(result)} if _cleanup_facts(result) else {}),
         }
 
 

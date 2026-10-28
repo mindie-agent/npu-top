@@ -30,7 +30,7 @@ When a team shares a fleet of Ascend NPU servers, everyone asks the same questio
 - **Agentless SSH Probing Across All Major Ascend Generations**: Runs `npu-smi` on bare-metal hosts to see NPU usage across containers, with built-in parsers for **single-die (910B-class)**, **dual-die (A3 / 910C-class)**, and **Ascend 950 (A5)** hosts.
 - **Fast When You're Watching, Gentle When You're Not**: Refreshes every 1s / 5s / 10s / 30s while the web dashboard is open, and automatically drops back to 120s background polling when no browser tab is active.
 - **90-Day Trends & Heatmaps with a Hard Disk Cap**: Stores 15-minute host and per-card summaries for 1-hour to 90-day trend charts and 2-hour bucketed heatmaps (CPU, memory, NPU, HBM, and per-card AICore), while strictly capping the SQLite file at `1024 MB` (`NFM_SQLITE_MAX_MB`).
-- **Passwords Never Touch Disk**: When onboarding servers in batch, password candidates are piped in memory via `stdin` to install a dedicated Ed25519 public key and are never saved to databases, config files, or logs.
+- **Configure Access Once**: Share SSH authentication with remote-dev and coordinator. Remote-dev stores passwords in the current user's private local file and installs a public key where supported; password-only hosts remain usable. The monitor database stores only an authentication reference.
 - **Ready-to-Use CLI & MCP Tools for AI Agents**: Provides 5 read-only MCP tools and matching CLI subcommands so your agent can screen candidate hosts from memory (`cache`) or trigger a fresh probe (`live`) without ever touching raw SSH commands or credentials.
 
 > [!IMPORTANT]
@@ -42,7 +42,7 @@ flowchart LR
     User["👀 Browser Dashboard & 🤖 AI Coding Agent"]
     Server["⚡ npu-top serve (127.0.0.1:8788)<br/>In-Memory Live Cache + Bounded SQLite History"]
     MCP["🔌 npu-top CLI / MCP<br/>(5 Read-Only Discovery Tools)"]
-    SSH["🔑 Dedicated Ed25519 Key + SSH Multiplexing"]
+    SSH["🔑 Shared remote-dev SSH Authentication"]
     Hosts["🖥️ Bare-Metal Ascend NPU Servers<br/>(910B / A3 910C / A5 950)"]
 
     User -->|"View live UI & heatmaps"| Server
@@ -198,7 +198,8 @@ To stay reliable across shared multi-host Ascend fleets, `npu-top` isolates part
 - **Unreachable Hosts Never Block the Fleet View**: If a server fails SSH authentication or times out, `npu-top` marks that specific host as `error` with actionable diagnostic details while keeping all other hosts live in the dashboard and CLI/MCP responses.
 - **Graceful Degradation on Partial Container Lookups (`container_lookups_degraded`)**: If `docker ps`/`docker inspect` or process-detail enrichment times out on a busy host, `npu-top` preserves the valid `npu-smi` card utilization and HBM metrics and flags `container_lookups_degraded` rather than dropping the card telemetry or presenting stale process details as fresh.
 - **Automatic 90-Day SQLite History Pruning**: Historical summaries and heatmaps are automatically pruned to a rolling 90-day window (`NFM_RETENTION_DAYS=90`) within the hard `1024 MB` SQLite size cap (`NFM_SQLITE_MAX_MB=1024`). If an existing SQLite file is corrupted, `npu-top` preserves the file for inspection and surfaces an explicit error instead of silently wiping it.
-- **Safe Inventory & SSH Key Bootstrap Boundaries**: Missing or malformed explicit inventory files (`NFM_INVENTORY_FILES`) fail fast on startup. During SSH public-key onboarding, `npu-top` distinguishes not-started, completed, and uncertain (`unknown`) remote writes without blindly re-sending commands, and passwords are never written to receipts or logs.
+- **Inventory and Authentication Boundaries**: Missing or malformed explicit inventory files (`NFM_INVENTORY_FILES`) fail at startup. Each `auth_ref` must resolve in the service user's shared remote-dev configuration. An unavailable reference is reported as not ready without creating replacement credentials. Routine probes remain read-only; explicit credential onboarding delegates key installation to remote-dev.
+- **Shared Password File**: Passwords default to `~/.mindie/ssh/credentials.json`. Set `REMOTE_DEV_AUTH_DIR` to change the shared directory or `REMOTE_DEV_CREDENTIAL_FILE` to choose the password file. This is a plaintext secret file in the user's private directory, with POSIX directory/file modes `0700`/`0600`. Run agents and the monitor as the same user with the same configuration so later SSH connections can reuse it without a system unlock prompt.
 
 ---
 
@@ -208,10 +209,9 @@ All settings are configured via environment variables (see [`.env.example`](./.e
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `NFM_STATE_DIR` | `./data` | Local folder for the SQLite DB, dedicated Ed25519 SSH key, `known_hosts`, and SSH control sockets |
+| `NFM_STATE_DIR` | `./data` | Monitor SQLite directory; remote-dev manages shared SSH authentication |
 | `NFM_INVENTORY_FILES` | unset | Path-separated JSON machine inventory files imported as active hosts on startup |
 | `NFM_HOST_POOL_FILES` | unset | Plain-text host pool files (first column); hosts only in pool files automatically get the `低优先级` (low-priority) tag |
-| `NFM_BOOTSTRAP_COMMAND` | unset | Optional helper command template to install the monitor public key using a one-time password on `stdin` |
 | `NFM_HBM_BUSY_THRESHOLD_MB` | `8192` | Fallback HBM threshold (MB) to mark a card busy (avoids treating ~6 GB idle A3 driver memory as busy) |
 | `NFM_SQLITE_MAX_MB` | `1024` | Hard cap on SQLite database size in MB (minimum 16); auto-prunes oldest days at 85% capacity |
 | `NFM_RETENTION_DAYS` | `90` | Number of days to retain historical summaries and heatmaps |
@@ -253,8 +253,10 @@ npu-top/
 
 ## Development & Testing
 
+The shared-auth development version requires the sibling remote-dev checkout. Install both to check component dependency compatibility.
+
 ```bash
-python3 -m pip install .
+python3 -m pip install ../remote-dev .
 python3 -m unittest discover -s tests -v
 npm ci && npm run lint && npm run build
 ```
