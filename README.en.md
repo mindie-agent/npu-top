@@ -203,6 +203,14 @@ To stay reliable across shared multi-host Ascend fleets, `npu-top` isolates part
 
 ---
 
+## Adding Servers and Reusing SSH Access
+
+Paste one IP per line in the add-server dialog. The default is `root:22`; the form also accepts an explicit username and port. Existing shared authentication is checked over a fresh SSH connection. If a password is supplied, remote-dev stores it once, installs and verifies a public key where supported, and retains password access when public keys are unavailable. No bootstrap command or `sshpass` installation is required.
+
+The dialog shows results and failure details for each endpoint, prevents duplicate submissions while a request is pending, and clears the masked password field. A batch accepts one shared password; register hosts with different passwords in separate batches. An uncertain installation must be checked before any further write.
+
+Upgrading preserves existing monitor identities and host trust until a shared profile exists. The database adds an `auth_ref` column automatically. Custom `MINDIE_TOP_BOOTSTRAP_COMMAND` / `NFM_BOOTSTRAP_COMMAND` installers are no longer used. Configure access through remote-dev or this dialog; coordinator inventory synchronization carries the same reference in both directions.
+
 ## Configuration Reference
 
 All settings are configured via environment variables (see [`.env.example`](./.env.example)):

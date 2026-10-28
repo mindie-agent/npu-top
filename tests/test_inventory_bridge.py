@@ -15,7 +15,7 @@ from npu_top import cli as CLI
 from npu_top.db import Database
 from npu_top.inventory_bridge import (
     InventoryBridgeError, _fsync_directory, import_from_coordinator, inventory_lock,
-    merge_observations, observed_machine_records, read_machines, write_machines,
+    merge_observations, observed_machine_records, read_machines, sync_to_coordinator, write_machines,
 )
 
 
@@ -258,6 +258,103 @@ class InventoryBridgeTests(unittest.TestCase):
             self.assertEqual(row["hardware"]["npu_count"], 16)
             self.assertTrue(any(mount["target"] == "/data/models" and mount["weight_candidate"]
                                 for mount in row["mounts"]))
+
+    def test_sync_to_coordinator_creates_and_adds_unprobed_batch_servers(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "coordinator" / "machines.json"
+            server = {
+                "id": "s2", "name": "a2-2", "host": "173.125.1.2",
+                "port": 22, "username": "root", "tags": ["A2", "canary"],
+            }
+            report = sync_to_coordinator(
+                path, [server], {}, include_unprobed=True, create_if_missing=True,
+            )
+            self.assertEqual(report["added"], 1)
+            doc = read_machines(path)
+            self.assertEqual(len(doc["machines"]), 1)
+            self.assertEqual(doc["machines"][0]["alias"], "a2-2")
+            self.assertEqual(doc["machines"][0]["host"], {"ip": "173.125.1.2", "port": 22, "user": "root"})
+            self.assertEqual(doc["machines"][0]["tags"], ["A2", "canary"])
+
+    def test_shared_auth_reference_survives_both_inventory_directions(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "machines.json"
+            reference = "ssh-" + "7" * 24
+            server = {
+                "id": "shared", "name": "shared", "host": "192.0.2.71",
+                "port": 2222, "username": "ops", "tags": [], "auth_ref": reference,
+            }
+            sync_to_coordinator(path, [server], {}, include_unprobed=True, create_if_missing=True)
+            document = read_machines(path)
+            self.assertEqual(document["machines"][0]["host"]["auth_ref"], reference)
+            db = Database(Path(root) / "monitor.sqlite3")
+            try:
+                db.initialize()
+                import_from_coordinator(path, db)
+                self.assertEqual(db.list_servers()[0]["auth_ref"], reference)
+                rotated = "ssh-" + "8" * 24
+                document["machines"][0]["host"]["auth_ref"] = rotated
+                write_machines(path, document)
+                import_from_coordinator(path, db)
+                self.assertEqual(db.list_servers()[0]["auth_ref"], rotated)
+            finally:
+                db.close()
+
+    def test_observation_does_not_assign_another_ssh_principals_reference(self) -> None:
+        document = {"machines": [{
+            "alias": "shared", "host": {"ip": "192.0.2.72", "port": 22, "user": "root",
+                                       "auth_ref": "ssh-" + "9" * 24},
+        }]}
+        merged, _ = merge_observations(document, [{
+            "alias": "shared", "host": "192.0.2.72", "port": 2222, "username": "ops",
+            "auth_ref": "ssh-" + "a" * 24,
+        }])
+        self.assertEqual(merged["machines"][0]["host"]["auth_ref"], "ssh-" + "9" * 24)
+
+    def test_batch_registration_and_collector_cycle_auto_sync_coordinator_inventory(self) -> None:
+        from test_console_routes import _json, console
+        from npu_top.scheduler import AdaptiveScheduler
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as root:
+            coord_dir = Path(root) / "coord"
+            machines_path = coord_dir / "machines.json"
+            with mock.patch.dict(os.environ, {"MINDIE_COORDINATOR_STATE_DIR": str(coord_dir)}, clear=False):
+                with console(seed_server=False) as (_db, host, port):
+                    status, _, payload = _json(host, port, "POST", "/api/servers/batch", {
+                        "servers": [{"name": "a3-165", "host": "192.168.13.165", "port": 22, "username": "root", "tags": ["A3"]}],
+                        "passwords": [],
+                    })
+                self.assertEqual(status, 207)
+                self.assertEqual(payload["coordinator_sync"][0]["status"], "completed")
+                self.assertTrue(machines_path.exists())
+                doc = read_machines(machines_path)
+                self.assertEqual(doc["machines"][0]["alias"], "a3-165")
+
+                # Collector cycle updates hardware and tags on existing machines.json
+                server_row = {
+                    "id": "s1", "name": "a3-165", "host": "192.168.13.165",
+                    "port": 22, "username": "root", "tags": ["A3"], "enabled": True,
+                }
+                settings = SimpleNamespace(
+                    idle_interval=120, history_interval=30, infrastructure_interval=60,
+                    retention_days=90, max_workers=1, inventory_files=(),
+                )
+                db = SimpleNamespace(
+                    latest_persisted=lambda: {}, close=lambda: None,
+                    list_servers=lambda: [server_row], record_success=lambda *_: None,
+                )
+                probe = SimpleNamespace(collect=lambda *_: {
+                    "server_id": "s1", "collected_at": 1000,
+                    "summary": {"npu_count": 8, "busy_npu_count": 0},
+                    "devices": [{"npu_id": i, "name": "Ascend910"} for i in range(8)],
+                })
+                scheduler = AdaptiveScheduler(settings, db, probe)
+                scheduler._collect_cycle(set())
+                updated_doc = read_machines(machines_path)
+                self.assertEqual(updated_doc["machines"][0]["hardware"]["soc"], "Ascend910C")
+                self.assertEqual(updated_doc["machines"][0]["hardware"]["npu_count"], 16)
+
 
 
 if __name__ == "__main__":

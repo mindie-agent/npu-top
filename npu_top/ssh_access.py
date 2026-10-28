@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+from dataclasses import replace
 import re
 import subprocess
 import time
@@ -21,12 +22,13 @@ from remote_dev.core.ssh_transport import RemoteCompleted, capture_launch, ssh_l
 
 HOST_PATTERN = re.compile(r"^[A-Za-z0-9_.:\-]+$")
 USER_PATTERN = re.compile(r"^[A-Za-z0-9_.\-]+$")
+KEY_INSTALL_STARTED = "__NPU_TOP_KEY_INSTALL_STARTED__"
 
 
-def capture_ssh(access, server, command, *, timeout_ms, input=None, config_only=False) -> RemoteCompleted:
+def capture_ssh(access, server, command, *, timeout_ms, input=None, config_only=False, fresh=False) -> RemoteCompleted:
     """Keep plan preparation and its owned SSH process inside one probe budget."""
     started = time.monotonic()
-    plan = access.launch(server, command, timeout_ms=timeout_ms)
+    plan = access.launch(server, command, timeout_ms=timeout_ms, **({"fresh": True} if fresh else {}))
     if config_only:
         plan.argv.insert(1, "-G")
     remaining_ms = int(timeout_ms - (time.monotonic() - started) * 1000)
@@ -93,10 +95,13 @@ class SshAccess:
 
     def launch(
         self, server: dict[str, Any], command: Sequence[str] | None = None,
-        *, timeout_ms: int | None = None,
+        *, timeout_ms: int | None = None, fresh: bool = False,
     ):
+        endpoint = self.endpoint(server)
+        if fresh:
+            endpoint = replace(endpoint, ssh_mux=False)
         return ssh_launch(
-            self.endpoint(server), command, timeout_ms=timeout_ms, repair=False,
+            endpoint, command, timeout_ms=timeout_ms, repair=False,
         )
 
     def preflight(self, server: dict[str, Any]) -> dict[str, Any]:
@@ -117,7 +122,8 @@ class SshAccess:
             if password is not None:
                 configured = auth.setup_access(self.endpoint(server), password=password, timeout_ms=30000)
                 return {**configured, "ok": True}
-            result = capture_ssh(self, server, ["true"], timeout_ms=12000)
+            # Explicit onboarding must verify current credentials, not a cached login.
+            result = capture_ssh(self, server, ["true"], timeout_ms=12000, fresh=True)
         except RemoteExecutionError as exc:
             return {
                 "ok": False, "state": "unknown" if exc.submission_state == "uncertain" else "not_ready",

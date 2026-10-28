@@ -108,10 +108,29 @@ def test_existing_monitor_host_trust_stays_on_the_shared_transport(tmp_path, mon
     monkeypatch.setenv("REMOTE_DEV_AUTH_DIR", str(tmp_path / "auth"))
     trust = tmp_path / "known_hosts"
     trust.write_text("# existing monitor host trust\n", encoding="utf-8")
-    plan = SshAccess(tmp_path, tmp_path).launch(SERVER, ["true"], timeout_ms=1000)
-    assert f"UserKnownHostsFile={trust}" in plan.argv
+    access = SshAccess(tmp_path, tmp_path)
+    assert access.endpoint(SERVER).known_hosts_file == str(trust)
+    plan = access.launch(SERVER, ["true"], timeout_ms=1000)
+    assert any(option.startswith("UserKnownHostsFile=") for option in plan.argv)
     assert trust.read_text(encoding="utf-8") == "# existing monitor host trust\n"
     assert not (tmp_path / "keys").exists()
+
+
+def test_explicit_connection_check_ignores_a_cached_publickey_login(tmp_path, shared_profile, monkeypatch):
+    server, profile = shared_profile
+    profile.update(auth_method="publickey", credential_ref=None)
+    ProfileStore().save(profile)
+    captured = []
+
+    def capture(plan, **_kwargs):
+        captured.append(plan)
+        return RemoteBytesCompleted(plan.argv, 255, b"", b"Permission denied (publickey).")
+
+    monkeypatch.setattr("npu_top.ssh_access.capture_launch", capture)
+    result = SshAccess(tmp_path, tmp_path).connect(server)
+    assert result["state"] == "not_ready"
+    assert "ControlPath=none" in captured[0].argv
+    assert "ControlMaster=no" in captured[0].argv
 
 
 @pytest.mark.parametrize("explicit_ref", [True, False])

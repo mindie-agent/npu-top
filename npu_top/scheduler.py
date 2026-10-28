@@ -16,6 +16,7 @@ from typing import Any
 from mindie_diagnostics import get_recorder, wrap_context
 
 from .db import Database
+from .inventory_bridge import configured_coordinator_paths, sync_to_coordinator
 from .probe import HostProbe
 from .settings import Settings
 
@@ -227,6 +228,7 @@ class AdaptiveScheduler:
         if not servers:
             return
         now = time.monotonic()
+        online_updates = 0
         with ThreadPoolExecutor(max_workers=min(self.settings.max_workers, len(servers))) as pool:
             futures = {}
             for server in servers:
@@ -271,6 +273,7 @@ class AdaptiveScheduler:
                     self._latest_persisted[server["id"]] = int(snapshot["collected_at"])
                 snapshot["status"] = "online"
                 snapshot["recording"] = {**storage, "history_requested": persist}
+                online_updates += 1
                 with self._condition:
                     self._snapshots[server["id"]] = snapshot
                     self._completed_requests[server["id"]] = request_generation
@@ -279,6 +282,23 @@ class AdaptiveScheduler:
                         # cycle publishes before a live waiter reacquires.
                         self._infrastructure_results[server["id"]] = (request_generation, snapshot)
                     self._condition.notify_all()
+        if online_updates > 0:
+            self._sync_coordinator_inventories(servers)
+
+    def _sync_coordinator_inventories(self, servers: list[dict[str, Any]]) -> None:
+        sync_paths = [
+            path for path in configured_coordinator_paths(getattr(self.settings, "inventory_files", ()))
+            if path.exists() and all(key in s for s in servers for key in ("host", "port"))
+        ]
+        if not sync_paths:
+            return
+        snapshots = self.snapshots()
+        for path in sync_paths:
+            with get_recorder("npu-top").operation("top.inventory.sync", level="DEBUG") as diagnostic:
+                try:
+                    sync_to_coordinator(path, servers, snapshots)
+                except Exception as exc:  # noqa: BLE001
+                    diagnostic.fail("coordinator_inventory_sync_failed", exception=exc)
 
     @staticmethod
     def _record_observation(write) -> dict:
