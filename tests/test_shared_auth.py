@@ -183,7 +183,8 @@ def test_probe_returns_completed_output_with_owned_cleanup_failure(tmp_path, mon
 
     monkeypatch.setattr(OwnedProcess, "stop", fail_cleanup)
     adapter = SimpleNamespace(launch=lambda *_args, **_kwargs: SshLaunch(
-        [sys.executable, "-c", "print('completed probe')"], None, ("isolated-test",),
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'completed probe\\n')"],
+        None, ("isolated-test",),
     ))
     result = HostProbe(adapter, timeout=1)._run_script(SERVER, "unused", 1)
     assert result.returncode == 0 and result.stdout == "completed probe\n"

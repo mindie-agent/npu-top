@@ -27,6 +27,17 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Install package
         run: python3 -m pip install . "pytest>=8,<10"
+      - name: Report installed Git and SSH selection
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import shutil
+          from remote_dev.core.ssh_transport import _ssh_executable
+          git = shutil.which("git")
+          print("Git on PATH:", git, flush=True)
+          print("Resolved Git:", Path(git).resolve() if git else None, flush=True)
+          print("Selected SSH:", _ssh_executable(), flush=True)
+          PY
       - name: Run backend unit tests against the installed package
         working-directory: ${{ runner.temp }}
         env:
