@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from npu_top.inventory import (
-    LOW_PRIORITY_TAG, ExternalKeyBootstrap, HostPoolFile, InventoryError, MachineInventoryFile, merge_sources,
+    LOW_PRIORITY_TAG, HostPoolFile, InventoryError, MachineInventoryFile, merge_sources,
 )
 from npu_top.settings import Settings
 
@@ -84,24 +84,16 @@ class InventoryTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "NFM_PORT"):
                     Settings.load()
 
-    def test_settings_parse_path_lists_and_bootstrap_command(self) -> None:
+    def test_settings_parse_path_lists(self) -> None:
         env = {
             "NFM_INVENTORY_FILES": os.pathsep.join(["/a/inventory.json", "", "/b/inventory.json"]),
             "NFM_HOST_POOL_FILES": "/a/hosts.txt",
-            "NFM_BOOTSTRAP_COMMAND": "  ",
         }
         with mock.patch.dict("os.environ", env, clear=False):
             settings = Settings.load()
         self.assertEqual(settings.inventory_files, (Path("/a/inventory.json"), Path("/b/inventory.json")))
         self.assertEqual(settings.host_pool_files, (Path("/a/hosts.txt"),))
-        self.assertIsNone(settings.bootstrap_command)
 
-    def test_bootstrap_template_rejects_unknown_placeholders(self) -> None:
-        bootstrap = ExternalKeyBootstrap("tool --host {host} --flag {unknown}")
-        with self.assertRaises(ValueError):
-            bootstrap.render({"host": "198.51.100.10", "port": 22, "username": "root"}, Path("/k.pub"))
-        with self.assertRaises(ValueError):
-            ExternalKeyBootstrap("   ")
 
 
 if __name__ == "__main__":

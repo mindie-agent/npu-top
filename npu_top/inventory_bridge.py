@@ -198,6 +198,7 @@ def coordinator_servers(document: Mapping[str, Any]) -> list[dict[str, Any]]:
         servers.append({
             "name": str(machine.get("alias") or host), "host": host, "port": port,
             "username": username, "tags": tags,
+            **({"auth_ref": host_data["auth_ref"]} if host_data.get("auth_ref") else {}),
         })
     return servers
 
@@ -223,8 +224,9 @@ def import_from_coordinator(path: Path | str, db: Any) -> dict[str, Any]:
         for tag in record["tags"]:
             if tag.casefold() not in {item.casefold() for item in merged}:
                 merged.append(tag)
-        if merged != tags:
-            db.update_server(current["id"], tags=merged)
+        auth_ref = record.get("auth_ref")
+        if merged != tags or (auth_ref and auth_ref != current.get("auth_ref")):
+            db.update_server(current["id"], tags=merged, auth_ref=auth_ref)
             updated += 1
         else:
             unchanged += 1
@@ -272,6 +274,7 @@ def observed_machine_records(
                     "hardware": {},
                     "tags": [str(tag) for tag in server.get("tags") or [] if str(tag).strip()],
                     "mounts": [],
+                    **({"auth_ref": server["auth_ref"]} if server.get("auth_ref") else {}),
                 })
             continue
         devices = [device for device in snapshot.get("devices") or [] if isinstance(device, dict)]
@@ -315,6 +318,7 @@ def observed_machine_records(
             "alias": str(server.get("name") or server["host"]), "host": server["host"],
             "port": int(server["port"]), "username": str(server.get("username") or "root"),
             "hardware": hardware, "tags": tags, "mounts": mounts,
+            **({"auth_ref": server["auth_ref"]} if server.get("auth_ref") else {}),
         }
         records.append(record)
     return records
@@ -364,6 +368,18 @@ def merge_observations(
             counts["added"] += 1
         else:
             counts["matched"] += 1
+        host_data = record["host"]
+        same_principal = (
+            str(host_data.get("ip") or "").casefold(),
+            int(host_data.get("port") or 22),
+            str(host_data.get("user") or "root"),
+        ) == (
+            str(observation.get("host") or "").casefold(),
+            int(observation.get("port") or 22),
+            str(observation.get("username") or "root"),
+        )
+        if same_principal and observation.get("auth_ref"):
+            host_data["auth_ref"] = observation["auth_ref"]
         hardware = observation.get("hardware") or {}
         if hardware:
             current_hardware = record.get("hardware")

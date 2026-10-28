@@ -1,21 +1,18 @@
 """Optional, explicitly configured sources of hosts to monitor.
 
-[Role] Loads host endpoints from explicit `MachineInventoryFile` / `HostPoolFile` paths and runs `ExternalKeyBootstrap`.
-[Invariants] Never walks parent checkouts or imports partial malformed files; exit `77` in `ExternalKeyBootstrap` means pre-write auth rejection, whereas other non-zero exits map to `unknown`.
-[Timeouts & Locks] `ExternalKeyBootstrap.run` honours `self.timeout`; passes password via `stdin` and redacts any echoed secret.
-[Side-Effect Policy] Reads local inventory files; executes operator-configured bootstrap command on demand.
+[Role] Loads host endpoints and shared authentication references from explicit inventory paths.
+[Invariants] Never walks parent checkouts, imports partial malformed files, or reads password fields.
+[Timeouts & Locks] Local file reads only; no network or subprocess waits.
+[Side-Effect Policy] Reads local inventory files without changing credentials or remote hosts.
 """
 
 from __future__ import annotations
 
 import json
-import shlex
-import subprocess
-import sys
 from pathlib import Path
 from typing import Any, Protocol
 
-from .ssh_access import KeyInstallResult, validate_endpoint
+from .ssh_access import validate_endpoint
 
 
 LOW_PRIORITY_TAG = "低优先级"
@@ -42,9 +39,8 @@ class InventorySource(Protocol):
 class MachineInventoryFile:
     """A JSON file of the form ``{"machines": [{"alias", "host": {...}}]}``.
 
-    Only ``host.ip``/``host.host``, ``host.port``, ``host.user`` and the
-    machine type are read. Container endpoints, credentials and any other
-    fields are ignored. Hosts listed here are treated as actively managed.
+    Host endpoint fields, ``host.auth_ref`` and machine type are read.
+    Container endpoints and raw credentials are ignored.
     """
 
     def __init__(self, path: Path) -> None:
@@ -80,6 +76,7 @@ class MachineInventoryFile:
             servers.append({
                 "name": str(machine.get("alias") or host), "host": host, "port": port,
                 "username": username, "tags": [str(machine_type)] if machine_type else [],
+                "auth_ref": host_data.get("auth_ref"),
                 "inventory_path": str(self.path), "workspace_enabled": True,
             })
         return servers
@@ -130,68 +127,3 @@ def merge_sources(sources: list[InventorySource]) -> list[dict[str, Any]]:
             seen.add(endpoint)
             merged.append(server)
     return merged
-
-
-class ExternalKeyBootstrap:
-    """Run an operator-supplied command that installs the monitor public key.
-
-    ``template`` is a shell-quoted command line whose ``{host}``, ``{port}``,
-    ``{user}`` and ``{public_key_file}`` placeholders are substituted per
-    argument. Exit 77 is reserved for authentication rejection before any remote
-    write; only this outcome permits trying another password. Other nonzero
-    exits and interrupted calls have uncertain effects. The one-time password is written to the command's stdin followed
-    by a newline; it is never placed in arguments or logs. Exit status 0 means
-    the key was installed. ``{python}`` expands to the running interpreter.
-    """
-
-    PLACEHOLDERS = ("host", "port", "user", "public_key_file", "python")
-
-    def __init__(self, template: str, *, timeout: int | None = 30) -> None:
-        self.argv_template = shlex.split(template)
-        if not self.argv_template:
-            raise ValueError("bootstrap command must not be empty")
-        self.timeout = timeout
-
-    def render(self, server: dict[str, Any], public_key_file: Path) -> list[str]:
-        values = {
-            "host": str(server["host"]), "port": str(server["port"]), "user": str(server["username"]),
-            "public_key_file": str(public_key_file), "python": sys.executable,
-        }
-        rendered = []
-        for argument in self.argv_template:
-            try:
-                rendered.append(argument.format(**values))
-            except (KeyError, IndexError, ValueError) as exc:
-                raise ValueError(f"unsupported placeholder in bootstrap command: {argument}") from exc
-        return rendered
-
-    def run(self, server: dict[str, Any], public_key_file: Path, password: str) -> KeyInstallResult:
-        command = self.render(server, public_key_file)
-        try:
-            result = subprocess.run(
-                command, input=password + "\n", stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, timeout=self.timeout, check=False,
-            )
-        except (subprocess.TimeoutExpired, TimeoutError):
-            return KeyInstallResult("unknown", "密钥引导超过调用者时限；远端写入结果不确定，请先核对")
-        except OSError as exc:
-            return KeyInstallResult("not_started", f"无法执行密钥引导命令: {type(exc).__name__}")
-        if result.returncode == 0:
-            return KeyInstallResult("completed")
-        if result.returncode == 77:
-            return KeyInstallResult("not_started", "密码认证被拒绝", authentication_rejected=True)
-        error = _safe_command_error(result.stdout, result.stderr)
-        if password:
-            error = error.replace(password, "[REDACTED]")
-        return KeyInstallResult("unknown", error)
-
-
-def _safe_command_error(stdout: str, stderr: str) -> str:
-    try:
-        payload = json.loads(stdout)
-        if isinstance(payload, dict):
-            return str(payload.get("message") or payload.get("error") or "密钥引导失败")[-1000:]
-    except json.JSONDecodeError:
-        pass
-    lines = [line for line in stderr.splitlines() if not line.startswith("__MINDIE_PROGRESS__=")]
-    return ("\n".join(lines) or "密钥引导失败")[-1000:]

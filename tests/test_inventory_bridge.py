@@ -276,6 +276,41 @@ class InventoryBridgeTests(unittest.TestCase):
             self.assertEqual(doc["machines"][0]["host"], {"ip": "173.125.1.2", "port": 22, "user": "root"})
             self.assertEqual(doc["machines"][0]["tags"], ["A2", "canary"])
 
+    def test_shared_auth_reference_survives_both_inventory_directions(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "machines.json"
+            reference = "ssh-" + "7" * 24
+            server = {
+                "id": "shared", "name": "shared", "host": "192.0.2.71",
+                "port": 2222, "username": "ops", "tags": [], "auth_ref": reference,
+            }
+            sync_to_coordinator(path, [server], {}, include_unprobed=True, create_if_missing=True)
+            document = read_machines(path)
+            self.assertEqual(document["machines"][0]["host"]["auth_ref"], reference)
+            db = Database(Path(root) / "monitor.sqlite3")
+            try:
+                db.initialize()
+                import_from_coordinator(path, db)
+                self.assertEqual(db.list_servers()[0]["auth_ref"], reference)
+                rotated = "ssh-" + "8" * 24
+                document["machines"][0]["host"]["auth_ref"] = rotated
+                write_machines(path, document)
+                import_from_coordinator(path, db)
+                self.assertEqual(db.list_servers()[0]["auth_ref"], rotated)
+            finally:
+                db.close()
+
+    def test_observation_does_not_assign_another_ssh_principals_reference(self) -> None:
+        document = {"machines": [{
+            "alias": "shared", "host": {"ip": "192.0.2.72", "port": 22, "user": "root",
+                                       "auth_ref": "ssh-" + "9" * 24},
+        }]}
+        merged, _ = merge_observations(document, [{
+            "alias": "shared", "host": "192.0.2.72", "port": 2222, "username": "ops",
+            "auth_ref": "ssh-" + "a" * 24,
+        }])
+        self.assertEqual(merged["machines"][0]["host"]["auth_ref"], "ssh-" + "9" * 24)
+
     def test_batch_registration_and_collector_cycle_auto_sync_coordinator_inventory(self) -> None:
         from test_console_routes import _json, console
         from npu_top.scheduler import AdaptiveScheduler

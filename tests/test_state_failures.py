@@ -1,38 +1,20 @@
-"""Verify failed background work visibility and non-replay of uncertain bootstrap writes."""
-import contextlib
+"""Verify background work and completed authentication remain visible on local failures."""
 import http.client
 import json
-import sqlite3
 import subprocess
 import threading
 from types import SimpleNamespace
 
-import pytest
 
-from npu_top.db import Database
-from npu_top.device_adapter import DeviceAdapter
-from npu_top.inventory import ExternalKeyBootstrap
 from npu_top.probe import HostProbe, attach_process_details
-from npu_top.serve import import_inventory, run_inventory_import
-from npu_top.ssh_access import KeyInstallResult, SshAccess
+from npu_top.serve import run_inventory_import
 from test_console_routes import _json, console
 
 SERVER = {"id": "one", "name": "one", "host": "192.0.2.1", "port": 22, "username": "root"}
 
 
-def initialized(path):
-    db = Database(path)
-    db.initialize()
-    server = db.upsert_server(SERVER)
-    return db, server
 
 
-def adapter_for(db, tmp_path, monkeypatch, *, install, auth=False):
-    ssh = SshAccess(tmp_path, tmp_path)
-    monkeypatch.setattr(ssh, "preflight", lambda *_: {"ok": True})
-    monkeypatch.setattr(ssh, "check_key_auth", lambda *_: (auth, None))
-    monkeypatch.setattr(ssh, "install_key_with_default_identity", install)
-    return DeviceAdapter(ssh, bootstrap_state=db)
 
 
 def test_background_inventory_failure_reaches_http_health_and_normal_read():
@@ -104,53 +86,17 @@ def test_completed_probe_survives_record_failure_without_advancing_history():
     assert scheduler.runtime_state()["storage_failures"] == 1
 
 
-@pytest.mark.parametrize("outcome", ["unknown", "completed"])
-def test_bootstrap_never_replays_unknown_or_completed_write(tmp_path, monkeypatch, outcome):
-    ssh = SshAccess(tmp_path, tmp_path)
-    monkeypatch.setattr(ssh, "preflight", lambda *_: {"ok": True})
-    monkeypatch.setattr(ssh, "check_key_auth", lambda *_: (False, None))
-    monkeypatch.setattr(
-        ssh, "install_key_with_default_identity", lambda *_: KeyInstallResult("not_started", authentication_rejected=True)
-    )
-    calls = []
-
-    def install(*args):
-        calls.append(args)
-        return KeyInstallResult(outcome, "synthetic outcome")
-
-    db, server = initialized(tmp_path / "monitor.sqlite3")
-    adapter = DeviceAdapter(ssh, key_bootstrap=SimpleNamespace(run=install), bootstrap_state=db)
-    result = adapter.bootstrap_with_passwords(server, ["first", "second"])
-    db.close()
-    assert len(calls) == 1
-    assert result["installation"] == outcome
-    assert result["state"] == ("unknown" if outcome == "unknown" else "verification_failed")
-    assert not result["ok"]
 
 
-def test_external_bootstrap_nonzero_is_uncertain_except_authentication_rejection(tmp_path, monkeypatch):
-    bootstrap = ExternalKeyBootstrap("synthetic-command")
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess([], 1, "", "failed"))
-    assert bootstrap.run({"host": "x", "port": 22, "username": "u"}, tmp_path / "public", "one-time").state == "unknown"
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess([], 77, "", "denied"))
-    result = bootstrap.run({"host": "x", "port": 22, "username": "u"}, tmp_path / "public", "one-time")
-    assert result.state == "not_started" and result.authentication_rejected
 
 
-def test_password_echo_is_not_saved_in_error_receipt(tmp_path, monkeypatch):
-    password = "unique-one-time-password"
-    monkeypatch.setattr(
-        subprocess, "run", lambda *_a, **_k: subprocess.CompletedProcess([], 1, "", "failed: " + password)
-    )
-    result = ExternalKeyBootstrap("synthetic").run(SERVER, tmp_path / "public", password)
-    assert password not in result.error and "[REDACTED]" in result.error
 
 
 def test_later_batch_record_failure_does_not_replace_completed_key_receipt(monkeypatch):
     from test_console_routes import StubAdapter
 
     auth = {"ok": False, "installation": "completed", "state": "verification_failed", "error": "login not verified"}
-    monkeypatch.setattr(StubAdapter, "bootstrap_with_passwords", lambda *_: auth)
+    monkeypatch.setattr(StubAdapter, "connect", lambda *_, **_kw: auth)
     with console(seed_server=False) as (db, host, port):
         monkeypatch.setattr(db, "record_failure", lambda *_: (_ for _ in ()).throw(OSError("record failure")))
         status, _, result = _json(host, port, "POST", "/api/servers/batch", {"servers": [SERVER], "passwords": []})

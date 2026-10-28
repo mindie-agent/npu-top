@@ -29,7 +29,7 @@ test('matches mixed results to endpoints even when receipts arrive out of order'
 
 test('preserves verified auth when scheduling later fails', () => {
   const [row] = onboardingOutcomes(servers.slice(0, 1), [
-    receipt(0, { ok: true }, { stage: 'schedule_observation', error: '采集调度失败' }),
+    receipt(0, { ok: true, auth_method: 'publickey' }, { stage: 'schedule_observation', error: '采集调度失败' }),
   ]);
   assert.equal(row.status, 'warning');
   assert.match(row.message, /密钥连接已验证.*采集调度失败/);
@@ -37,10 +37,18 @@ test('preserves verified auth when scheduling later fails', () => {
 
 test('preserves both the original auth error and its recording failure', () => {
   const [row] = onboardingOutcomes(servers.slice(0, 1), [
-    receipt(0, { ok: false, installation: 'completed', error: '密钥登录验证失败' },
+    receipt(0, { ok: false, bootstrap: { installation: 'completed' }, error: '密钥登录验证失败' },
       { stage: 'record_auth_failure', error: '数据库写入失败' }),
   ]);
   assert.match(row.message, /密钥已安装.*密钥登录验证失败.*数据库写入失败/);
+});
+
+test('reports reusable password authentication without claiming key installation', () => {
+  const [row] = onboardingOutcomes(servers.slice(0, 1), [
+    receipt(0, { ok: true, auth_method: 'password', bootstrap: { installation: 'failed' } }),
+  ]);
+  assert.equal(row.status, 'success');
+  assert.equal(row.message, '密码连接已验证');
 });
 
 test('explains uncertain installation separately from authentication rejection', () => {

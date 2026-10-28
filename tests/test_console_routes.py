@@ -64,7 +64,7 @@ class StubAdapter:
     def validate_endpoint(self, host, port, username) -> None:
         return None
 
-    def bootstrap_with_passwords(self, server, passwords) -> dict:
+    def connect(self, server, *, password=None) -> dict:
         return {"ok": True}
 
 

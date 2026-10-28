@@ -8,7 +8,8 @@ export type OnboardingServer = { name: string; host: string; port: number; usern
 export type OnboardingReceipt = {
   input_index: number;
   registration: string;
-  auth: { ok: boolean; state?: string; installation?: string; error?: string };
+  auth: { ok: boolean; state?: string; installation?: string; error?: string;
+    auth_method?: string; bootstrap?: { installation?: string } };
   failure?: { stage: string; error: string };
 };
 export type OnboardingOutcome = { endpoint: string; status: 'success' | 'warning' | 'error'; message: string };
@@ -24,9 +25,11 @@ export function onboardingOutcomes(servers: OnboardingServer[], receipts: Onboar
     const host = server.host.includes(':') ? `[${server.host}]` : server.host;
     const endpoint = `${server.username}@${host}:${server.port}`;
     if (item.auth.ok) {
-      return { endpoint, status: item.failure ? 'warning' : 'success', message: `密钥连接已验证${item.failure ? `；${item.failure.error}` : ''}` };
+      const method = item.auth.auth_method === 'password' ? '密码连接已验证' : item.auth.auth_method === 'publickey' ? '密钥连接已验证' : 'SSH 连接已验证';
+      return { endpoint, status: item.failure ? 'warning' : 'success', message: `${method}${item.failure ? `；${item.failure.error}` : ''}` };
     }
-    const outcome = item.auth.installation === 'completed' ? '密钥已安装；' : item.auth.state === 'unknown' ? '远端写入结果不确定，请先核对；' : '';
+    const installed = (item.auth.bootstrap?.installation || item.auth.installation) === 'completed';
+    const outcome = installed ? '密钥已安装；' : item.auth.state === 'unknown' ? '远端写入结果不确定，请先核对；' : '';
     // Preserve the authentication error even if saving the failure also failed.
     const errors = [item.auth.error, item.failure?.error].filter(Boolean).join('；');
     return { endpoint, status: 'error', message: `${outcome}${errors || '未完成'}` };

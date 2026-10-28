@@ -259,27 +259,27 @@ export default function Dashboard() {
       const [name, host, port = '22', username = 'root', tags = ''] = line.split(',').map((value) => value.trim());
       return { name, host: host || name, port: Number(port || '22'), username: username || 'root', tags: tags ? tags.split('|') : [] };
     });
-    const passwords = String(form.get('passwords') || '').split(/\r?\n/).filter(Boolean);
-    form.delete('passwords');
-    const passwordField = formElement.elements.namedItem('passwords');
-    if (passwordField instanceof HTMLTextAreaElement) passwordField.value = '';
+    let password = String(form.get('password') || '') || undefined;
+    form.delete('password');
+    const passwordField = formElement.elements.namedItem('password');
+    if (passwordField instanceof HTMLInputElement) passwordField.value = '';
     addingRef.current = true;
     setAdding(true);
     setOutcomes([]);
-    setResult('正在逐台检查连接并配置监控密钥…');
+    setResult('正在逐台验证共享 SSH 认证…');
     try {
       const data = await requestJson<{ results: OnboardingReceipt[] }>('/api/servers/batch', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ servers, passwords }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ servers, password }),
       });
       if (!Array.isArray(data.results)) throw new Error('服务器添加回执不完整，请先核对清单');
       setOutcomes(onboardingOutcomes(servers, data.results));
       const ok = data.results.filter((item) => item.auth.ok).length;
-      setResult(`${ok}/${servers.length} 台已验证密钥连接。一次性密码已从输入框清除。`);
+      setResult(`${ok}/${servers.length} 台已验证 SSH 连接。密码已从输入框清除，后续连接复用已配置的认证方式。`);
       await load();
     } catch (reason) {
       setResult(reason instanceof Error ? reason.message : '批量添加结果未确认，请先核对清单');
     } finally {
-      passwords.fill('');
+      password = undefined;
       addingRef.current = false;
       setAdding(false);
     }
@@ -340,8 +340,8 @@ export default function Dashboard() {
         <header><div><p className="section-kicker">Batch onboarding</p><h2 id="add-title">添加 NPU 服务器</h2></div><button aria-label="关闭" onClick={() => setModal(false)}>×</button></header>
         <form onSubmit={addServers} aria-busy={adding}>
           <label>服务器列表<span>每行一个 IP，或：名称, 主机, 端口, 用户, 标签1|标签2；默认端口 22、用户 root</span><textarea name="servers" required rows={7} disabled={adding} placeholder={'192.0.2.21\nexample-a2-07, 192.0.2.37, 22, root, A2'} /></label>
-          <label>一次性密码候选<span>可选，每行一个；已有密钥可登录时无需填写</span><textarea name="passwords" rows={4} disabled={adding} autoComplete="new-password" spellCheck={false} /></label>
-          <div className="security-note"><b>自动建立密钥连接</b><p>先检查已有密钥；需要时使用本次密码安装专用公钥，再验证密钥登录。密码仅用于本次请求。服务器身份指纹变化时会中止连接。</p></div>
+          <label>SSH 密码<span>可选；这批主机使用同一密码，不同密码的主机请分批添加</span><input name="password" type="password" disabled={adding} autoComplete="new-password" /></label>
+          <div className="security-note"><b>共享 SSH 认证</b><p>已有认证配置可直接复用。输入密码后会保存到本机共享凭据文件并尝试安装公钥；无法使用公钥时自动使用保存的密码，后续无需重复输入。主机身份变化会中止连接。</p></div>
           {result && <p className="form-result" role="status">{result}</p>}
           {outcomes.length > 0 && <ul className="onboarding-results" aria-label="服务器连接结果">{outcomes.map((item, index) =>
             <li className={`onboarding-result onboarding-result--${item.status}`} key={`${item.endpoint}-${index}`}>

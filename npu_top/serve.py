@@ -1,9 +1,9 @@
 """Daemon startup, background inventory import, and graceful shutdown for `npu-top serve`.
 
 [Role] Wires `Settings`, `Database`, `DeviceAdapter`, `HostProbe`, `AdaptiveScheduler`, and `AppServer`.
-[Invariants] Resolves explicit inventory files before starting the server; surfaces background import or bootstrap failures in `app.inventory_state` and `/api/health`.
+[Invariants] Resolves explicit inventory files before starting the server; surfaces background import or shared authentication failures in `app.inventory_state` and `/api/health`.
 [Timeouts & Locks] Graceful `SIGTERM`/`KeyboardInterrupt` shutdown stops `AdaptiveScheduler` (`5s` join) and closes `AppServer` and `Database`.
-[Side-Effect Policy] Binds loopback HTTP port, initializes SQLite DB, ensures SSH keypair, and runs background inventory bootstrap/collection.
+[Side-Effect Policy] Binds loopback HTTP port, initializes SQLite DB, and runs read-only inventory access checks and collection.
 """
 from __future__ import annotations
 
@@ -64,10 +64,13 @@ def import_inventory(app, inventory):
                 if tags != server_record.get("tags", []):
                     db.update_server(server_record["id"], tags=tags)
                     server_record = {**server_record, "tags": tags}
+                if item.get("auth_ref") and item["auth_ref"] != server_record.get("auth_ref"):
+                    db.update_server(server_record["id"], auth_ref=item["auth_ref"])
+                    server_record = {**server_record, "auth_ref": item["auth_ref"]}
             result.update(registration="completed", server_id=server_record["id"])
             stage = "bootstrap"
             with get_recorder("npu-top").operation("top.inventory.bootstrap") as operation:
-                auth = adapter.bootstrap_with_passwords(server_record, [])
+                auth = adapter.connect(server_record)
                 result["auth"] = auth
                 if not auth.get("ok"):
                     operation.fail("bootstrap_failed", detail=auth.get("error"))
@@ -76,7 +79,7 @@ def import_inventory(app, inventory):
                 scheduler.collect_now(server_record["id"])
             else:
                 stage = "record_auth_failure"
-                db.record_failure(server_record["id"], str(auth.get("error") or "监控密钥不可用"),
+                db.record_failure(server_record["id"], str(auth.get("error") or "SSH 认证不可用"),
                                   operation.summary()["duration_ms"])
             existing[endpoint] = server_record
         except Exception as exc:
@@ -100,7 +103,6 @@ def main() -> None:
     settings.prepare()
     db = Database(settings.state_dir / "monitor.sqlite3", settings.sqlite_max_mb * 1024 * 1024)
     db.initialize()
-    adapter.ensure_key()
     probe = HostProbe(adapter, settings.ssh_timeout, settings.hbm_busy_threshold_mb)
     scheduler = AdaptiveScheduler(settings, db, probe)
     app = App(settings, db, adapter, scheduler)
