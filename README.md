@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/mindie-agent/mindie-agent/main/assets/brand/mindie-agent-logo.png" alt="MindIE Agent logo" width="128" height="128">
+  <img src="assets/brand/npu-top-logo.png" alt="npu-top logo" width="128" height="128">
 </p>
 
 <h1 align="center">MindIE Agent NPU Top (<code>npu-top</code>)</h1>
@@ -56,7 +56,7 @@ flowchart LR
 
 ## 快速开始
 
-直接复制下面这句话发给你的 Claude Code、Codex、Kimi Code 或 DeepSeek Harness（DSH），由 AI Agent 自动把监控后台和 MCP 查卡工具一次配好：
+直接复制下面这句话发给你的 Claude Code、Codex、Kimi Code、DeepSeek Harness（DSH）或 Google Antigravity（AGY），由 AI Agent 自动把监控后台和 MCP 查卡工具一次配好：
 
 ```text
 帮我安装并配置 https://github.com/mindie-agent/npu-top

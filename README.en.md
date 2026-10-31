@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/mindie-agent/mindie-agent/main/assets/brand/mindie-agent-logo.png" alt="MindIE Agent logo" width="128" height="128">
+  <img src="assets/brand/npu-top-logo.png" alt="npu-top logo" width="128" height="128">
 </p>
 
 <h1 align="center">MindIE Agent NPU Top (<code>npu-top</code>)</h1>
@@ -56,7 +56,7 @@ flowchart LR
 
 ## Quick Start
 
-Copy and paste this sentence to Claude Code, Codex, Kimi Code, or DeepSeek Harness (DSH) so your AI Agent launches the local collector and registers the MCP tools automatically:
+Copy and paste this sentence to Claude Code, Codex, Kimi Code, DeepSeek Harness (DSH), or Google Antigravity (AGY) so your AI Agent launches the local collector and registers the MCP tools automatically:
 
 ```text
 Please install and configure https://github.com/mindie-agent/npu-top for me
