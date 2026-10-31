@@ -72,12 +72,12 @@ flowchart LR
 1. **检查基础依赖**：确认本机有 Python `>= 3.11`、`uv` 以及系统的 `ssh` / `ssh-keygen`。
 2. **后台启动本地 `npu-top serve` 监控服务**（默认监听本地回环 `http://127.0.0.1:8788`）：
    ```bash
-   uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.2.0/npu_top-0.2.0-py3-none-any.whl" npu-top serve
+   uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl" npu-top serve
    ```
 3. **在当前宿主客户端注册 `npu-top` MCP Server**：
    - **Claude Code**（写入 `.mcp.json` 或直接运行命令）：
      ```bash
-     claude mcp add npu-top -e MINDIE_TOP_URL=http://127.0.0.1:8788 -- uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.2.0/npu_top-0.2.0-py3-none-any.whl" npu-top mcp
+     claude mcp add npu-top -e MINDIE_TOP_URL=http://127.0.0.1:8788 -- uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl" npu-top mcp
      ```
    - **Cursor**（写入 `.cursor/mcp.json`）或通用 `.mcp.json`：
      ```json
@@ -87,7 +87,7 @@ flowchart LR
            "command": "uvx",
            "args": [
              "--from",
-             "https://github.com/mindie-agent/npu-top/releases/download/v0.2.0/npu_top-0.2.0-py3-none-any.whl",
+             "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl",
              "npu-top",
              "mcp"
            ],
@@ -106,7 +106,7 @@ flowchart LR
            "command": "uvx",
            "args": [
              "--from",
-             "https://github.com/mindie-agent/npu-top/releases/download/v0.2.0/npu_top-0.2.0-py3-none-any.whl",
+             "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl",
              "npu-top",
              "mcp"
            ],
@@ -121,7 +121,7 @@ flowchart LR
      ```toml
      [mcp_servers.npu_top]
      command = "uvx"
-     args = ["--from", "https://github.com/mindie-agent/npu-top/releases/download/v0.2.0/npu_top-0.2.0-py3-none-any.whl", "npu-top", "mcp"]
+     args = ["--from", "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl", "npu-top", "mcp"]
      env = { MINDIE_TOP_URL = "http://127.0.0.1:8788" }
      ```
 4. **验证连通性**：运行 `curl -sf http://127.0.0.1:8788/api/health` 确认返回 `"status": "ok"`，并告知用户可在浏览器打开 `http://127.0.0.1:8788` 查看实时看板或添加服务器。
@@ -133,7 +133,7 @@ flowchart LR
 **推荐做法（直接用打包好前端的 Release Wheel，无需安装 Node.js）：**
 
 ```bash
-uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.2.0/npu_top-0.2.0-py3-none-any.whl" npu-top serve
+uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl" npu-top serve
 ```
 
 启动后直接用浏览器打开 `http://127.0.0.1:8788` 即可看到 Web 监控台！
@@ -200,16 +200,15 @@ npu-top mounts 192.0.2.21 --live
 - **单机故障隔离，绝不连累全局看板**：当某台昇腾服务器 SSH 超时、断网或不可达时，`npu-top` 会将该主机标记为 `error` 并附带具体诊断信息，同时其余在线机器的实时采样与看板展示照常运行。
 - **容器与进程归属降级不丢卡指标（`container_lookups_degraded`）**：如果宿主机上 Docker 响应超时或部分容器 PID 映射失败，采集器仍会完整保留已拿到的 `npu-smi` 算力与 HBM 显存指标，仅在状态中显式标注 `container_lookups_degraded`（绝不把过期的进程详情冒充为本次最新结果）。
 - **90 天历史数据自动滚动清理**：本地 SQLite 数据库按 90 天窗口（`NFM_RETENTION_DAYS=90`）与 `1024 MB` 体积上限（`NFM_SQLITE_MAX_MB=1024`）自动淘汰最旧的历史聚点与热力图数据；若发现已有数据库文件损坏，会保留原文件现场并直接报错，绝不静默清空。
-- **清单与认证边界**：显式配置的机器清单（`NFM_INVENTORY_FILES`）若缺失或格式损坏会直接报错阻止启动。主机的 `auth_ref` 必须能在当前服务用户的 remote-dev 凭据配置中解析；引用不可用时显示未就绪，不会创建另一套密码。常规采集只读，公钥安装只在显式添加凭据时由 remote-dev 执行。
-- **共享密码文件**：默认保存于 `~/.mindie/ssh/credentials.json`，可用 `REMOTE_DEV_AUTH_DIR` 修改共享目录，或用 `REMOTE_DEV_CREDENTIAL_FILE` 指定密码文件。密码以明文保存在用户私有目录中；POSIX 目录和文件权限分别为 `0700`、`0600`。各 agent 和监控服务应使用同一用户及同一配置，后续 SSH 自动读取该文件，不需要输入系统解锁密码。
+- **与 `remote-dev` 和 `mindie-coordinator` 共用 SSH 认证**：机器清单（`NFM_INVENTORY_FILES`）通过 `auth_ref` 直接引用当前用户在 `~/.mindie/ssh/` 下的共享 SSH 认证配置（支持通过 `REMOTE_DEV_AUTH_DIR` 或 `REMOTE_DEV_CREDENTIAL_FILE` 自定义）。日常监控采集保持纯只读探测；只有在“添加 NPU 服务器”弹窗中录入密码时，才会调用 `remote-dev` 完成一次性免密公钥安装或保存密码凭证。
 
-## 添加服务器与复用 SSH 认证
+## 在 Web 看板中添加服务器
 
-在“添加 NPU 服务器”中粘贴 IP（每行一个）；默认使用 `root:22`，也可按表单格式指定用户名和端口。已有共享认证会通过新 SSH 连接验证。输入密码后，remote-dev 保存一次凭据，在支持公钥的主机上安装并验证公钥；不支持公钥时保留密码登录。无需配置引导命令或安装 `sshpass`。
+在看板右上角的“添加 NPU 服务器”弹窗中，可以按行粘贴多台服务器 IP（默认使用 `root:22`，也可指定用户名和端口）：
 
-页面逐台显示连接结果及失败原因，提交期间禁止重复提交，并清空掩码密码输入框。一批主机共用一个密码，不同密码的主机请分批添加。公钥安装结果不确定时须先核对结果，避免重复写入。
-
-升级后，尚未建立共享配置的主机继续使用原监控私钥和主机指纹文件；数据库自动增加 `auth_ref` 列。旧 `MINDIE_TOP_BOOTSTRAP_COMMAND` / `NFM_BOOTSTRAP_COMMAND` 自定义安装器不再使用，请通过 remote-dev 或本页面配置认证。与 coordinator 的双向清单同步会传递同一个引用。
+- **已有免密或共享认证直接连通**：如果目标机器已经在 `remote-dev` 或 `mindie-coordinator` 中配过认证，`npu-top` 会直接通过新 SSH 连接验证并纳入监控。
+- **输入一次密码批量接入**：对于尚未配免密的新机器，填入密码后 `remote-dev` 会自动保存凭证并在支持公钥的机器上安装免密公钥（无需在宿主机安装 `sshpass`），弹窗中会逐台展示连通结果与诊断原因。
+- **双向清单同步**：在 `npu-top` 或 `mindie-coordinator` 中添加的主机及 `auth_ref` 引用支持双向同步，旧库升级时会自动补齐 `auth_ref` 字段并平滑兼容原有监控密钥。
 
 ## 配置参数一览
 
@@ -261,10 +260,10 @@ npu-top/
 
 ## 本地开发与测试
 
-共享认证开发版本需要同级目录的 remote-dev 源码；一起安装以验证组件依赖兼容性。
+在本地运行后端单元测试与前端构建（若同时在本地联调 `remote-dev`，可一并安装 `../remote-dev`）：
 
 ```bash
-python3 -m pip install ../remote-dev .
+python3 -m pip install -e .
 python3 -m unittest discover -s tests -v
 npm ci && npm run lint && npm run build
 ```

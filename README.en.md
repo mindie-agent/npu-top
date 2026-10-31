@@ -72,12 +72,12 @@ If you are an AI Agent receiving the prompt above, follow these steps to install
 1. **Check Prerequisites**: Verify Python `>= 3.11`, `uv`, and system `ssh` / `ssh-keygen` are available.
 2. **Start the Local `npu-top serve` Collector in the Background** (binds to `http://127.0.0.1:8788` by default):
    ```bash
-   uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.2.0/npu_top-0.2.0-py3-none-any.whl" npu-top serve
+   uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl" npu-top serve
    ```
 3. **Register the `npu-top` MCP Server in Your Host Client**:
    - **Claude Code** (add to `.mcp.json` or run via CLI):
      ```bash
-     claude mcp add npu-top -e MINDIE_TOP_URL=http://127.0.0.1:8788 -- uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.2.0/npu_top-0.2.0-py3-none-any.whl" npu-top mcp
+     claude mcp add npu-top -e MINDIE_TOP_URL=http://127.0.0.1:8788 -- uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl" npu-top mcp
      ```
    - **Cursor** (`.cursor/mcp.json`) or standard `.mcp.json`:
      ```json
@@ -87,7 +87,7 @@ If you are an AI Agent receiving the prompt above, follow these steps to install
            "command": "uvx",
            "args": [
              "--from",
-             "https://github.com/mindie-agent/npu-top/releases/download/v0.2.0/npu_top-0.2.0-py3-none-any.whl",
+             "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl",
              "npu-top",
              "mcp"
            ],
@@ -106,7 +106,7 @@ If you are an AI Agent receiving the prompt above, follow these steps to install
            "command": "uvx",
            "args": [
              "--from",
-             "https://github.com/mindie-agent/npu-top/releases/download/v0.2.0/npu_top-0.2.0-py3-none-any.whl",
+             "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl",
              "npu-top",
              "mcp"
            ],
@@ -121,7 +121,7 @@ If you are an AI Agent receiving the prompt above, follow these steps to install
      ```toml
      [mcp_servers.npu_top]
      command = "uvx"
-     args = ["--from", "https://github.com/mindie-agent/npu-top/releases/download/v0.2.0/npu_top-0.2.0-py3-none-any.whl", "npu-top", "mcp"]
+     args = ["--from", "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl", "npu-top", "mcp"]
      env = { MINDIE_TOP_URL = "http://127.0.0.1:8788" }
      ```
 4. **Verify Health**: Run `curl -sf http://127.0.0.1:8788/api/health` to confirm `"status": "ok"`, and let the user know they can open `http://127.0.0.1:8788` in their browser or ask you to check NPU availability across servers.
@@ -133,7 +133,7 @@ If you are an AI Agent receiving the prompt above, follow these steps to install
 **Recommended (run directly from the pre-built GitHub Release wheel — no local Node.js needed):**
 
 ```bash
-uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.2.0/npu_top-0.2.0-py3-none-any.whl" npu-top serve
+uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl" npu-top serve
 ```
 
 Then open `http://127.0.0.1:8788` in your browser.
@@ -198,18 +198,17 @@ To stay reliable across shared multi-host Ascend fleets, `npu-top` isolates part
 - **Unreachable Hosts Never Block the Fleet View**: If a server fails SSH authentication or times out, `npu-top` marks that specific host as `error` with actionable diagnostic details while keeping all other hosts live in the dashboard and CLI/MCP responses.
 - **Graceful Degradation on Partial Container Lookups (`container_lookups_degraded`)**: If `docker ps`/`docker inspect` or process-detail enrichment times out on a busy host, `npu-top` preserves the valid `npu-smi` card utilization and HBM metrics and flags `container_lookups_degraded` rather than dropping the card telemetry or presenting stale process details as fresh.
 - **Automatic 90-Day SQLite History Pruning**: Historical summaries and heatmaps are automatically pruned to a rolling 90-day window (`NFM_RETENTION_DAYS=90`) within the hard `1024 MB` SQLite size cap (`NFM_SQLITE_MAX_MB=1024`). If an existing SQLite file is corrupted, `npu-top` preserves the file for inspection and surfaces an explicit error instead of silently wiping it.
-- **Inventory and Authentication Boundaries**: Missing or malformed explicit inventory files (`NFM_INVENTORY_FILES`) fail at startup. Each `auth_ref` must resolve in the service user's shared remote-dev configuration. An unavailable reference is reported as not ready without creating replacement credentials. Routine probes remain read-only; explicit credential onboarding delegates key installation to remote-dev.
-- **Shared Password File**: Passwords default to `~/.mindie/ssh/credentials.json`. Set `REMOTE_DEV_AUTH_DIR` to change the shared directory or `REMOTE_DEV_CREDENTIAL_FILE` to choose the password file. This is a plaintext secret file in the user's private directory, with POSIX directory/file modes `0700`/`0600`. Run agents and the monitor as the same user with the same configuration so later SSH connections can reuse it without a system unlock prompt.
+- **Shared SSH Authentication with `remote-dev` & `mindie-coordinator`**: Machine inventory entries (`NFM_INVENTORY_FILES`) resolve `auth_ref` against the current user's shared `~/.mindie/ssh/` store (configurable via `REMOTE_DEV_AUTH_DIR` or `REMOTE_DEV_CREDENTIAL_FILE`). Routine monitoring probes remain strictly read-only, while entering a password in the "Add NPU Server" dialog delegates one-time SSH key installation or credential storage to `remote-dev`.
 
 ---
 
 ## Adding Servers and Reusing SSH Access
 
-Paste one IP per line in the add-server dialog. The default is `root:22`; the form also accepts an explicit username and port. Existing shared authentication is checked over a fresh SSH connection. If a password is supplied, remote-dev stores it once, installs and verifies a public key where supported, and retains password access when public keys are unavailable. No bootstrap command or `sshpass` installation is required.
+In the "Add NPU Server" dialog on the web dashboard, paste one or more server IPs (one per line; defaults to `root:22`, with optional custom user and port):
 
-The dialog shows results and failure details for each endpoint, prevents duplicate submissions while a request is pending, and clears the masked password field. A batch accepts one shared password; register hosts with different passwords in separate batches. An uncertain installation must be checked before any further write.
-
-Upgrading preserves existing monitor identities and host trust until a shared profile exists. The database adds an `auth_ref` column automatically. Custom `MINDIE_TOP_BOOTSTRAP_COMMAND` / `NFM_BOOTSTRAP_COMMAND` installers are no longer used. Configure access through remote-dev or this dialog; coordinator inventory synchronization carries the same reference in both directions.
+- **Instant Reuse of Existing SSH Profiles**: If a host was already enrolled via `remote-dev` or `mindie-coordinator`, `npu-top` verifies the existing shared authentication over a fresh SSH connection and starts polling immediately.
+- **Enter a Password Once for New Hosts**: When adding a host that does not yet have SSH keys configured, enter its password once — `remote-dev` stores the credential and installs/verifies an SSH public key automatically (no `sshpass` required), reporting per-host connection results right in the dialog.
+- **Two-Way Inventory Sync**: Host entries and `auth_ref` references synchronize cleanly between `npu-top` and `mindie-coordinator`, and existing databases automatically add the `auth_ref` column on upgrade.
 
 ## Configuration Reference
 
@@ -261,10 +260,10 @@ npu-top/
 
 ## Development & Testing
 
-The shared-auth development version requires the sibling remote-dev checkout. Install both to check component dependency compatibility.
+Run the Python unit test suite and frontend build locally (add `../remote-dev` if co-developing against a local `remote-dev` checkout):
 
 ```bash
-python3 -m pip install ../remote-dev .
+python3 -m pip install -e .
 python3 -m unittest discover -s tests -v
 npm ci && npm run lint && npm run build
 ```
