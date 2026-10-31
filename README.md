@@ -31,7 +31,7 @@
 - **平时省资源，看面板时秒级刷新**：你在浏览器打开看板时支持 1s / 5s / 10s / 30s 实时刷新；关掉网页后自动降频到 120s 后台巡检，绝不给服务器添乱。
 - **90 天历史趋势与热力图，磁盘占用有上限**：自动保存 15 分钟粒度的历史数据，展示 CPU、内存、NPU、HBM 和逐卡 AICore 热力图；同时把 SQLite 数据库严格限制在 `1024 MB` 以内（可通过 `NFM_SQLITE_MAX_MB` 调整），满了自动清理最老的数据，绝不撑爆你的本地硬盘。
 - **一次配置，共享认证**：与 remote-dev、coordinator 共用同一套 SSH 认证。密码由 remote-dev 保存到当前用户的本地私有文件，允许公钥时自动安装；仅支持密码的主机也能持续采集。监控数据库只保存认证引用。
-- **给 AI 助手配好现成的查卡工具（CLI + MCP）**：内置 5 个只读 MCP 工具和同名 CLI 命令。AI 助手不用自己拼 SSH 命令、更不用碰你的服务器密码，就能秒查哪台机器有空卡、哪个盘能放权重。
+- **给 AI 助手配好现成的查卡工具（CLI + MCP）**：内置 6 个只读 MCP 工具（`npu_status`、`server_status`、`list_mounts`、`find_npu_capacity`、`npu_telemetry_window`、`list_npu_servers`）与对应的 CLI 子命令。AI 助手不用自己拼 SSH 命令、更不用碰你的服务器密码，就能秒查哪台机器有空卡、哪个盘能放权重。
 
 > [!IMPORTANT]
 > **核心约定：`npu-top` 只负责“看路况”，不负责“抢车位”（`allocation_authority: false`）**
@@ -41,7 +41,7 @@
 flowchart LR
     User["👀 开发者浏览器 & 🤖 AI 编程助手"]
     Server["⚡ npu-top serve (127.0.0.1:8788)<br/>内存实时缓存 + 有界 SQLite 历史库"]
-    MCP["🔌 npu-top CLI / MCP<br/>(5 个只读查卡工具)"]
+    MCP["🔌 npu-top CLI / MCP<br/>(6 个只读查卡工具)"]
     SSH["🔑 remote-dev 共享 SSH 认证"]
     Hosts["🖥️ 多台昇腾 NPU 裸机服务器<br/>(910B / A3 910C / A5 950)"]
 
@@ -56,9 +56,7 @@ flowchart LR
 
 ## 快速开始
 
-### 方式一：直接把链接发给你的 Agent 自动安装/接入（推荐）
-
-复制下面这句话发给你的 Claude Code、Codex、Kimi Code 或 Cursor，让它帮你把监控后台和 MCP 查卡工具一次配好：
+直接复制下面这句话发给你的 Claude Code、Codex、Kimi Code 或 DeepSeek Harness（DSH），由 AI Agent 自动把监控后台和 MCP 查卡工具一次配好：
 
 ```text
 帮我安装并配置 https://github.com/mindie-agent/npu-top
@@ -127,28 +125,6 @@ flowchart LR
 4. **验证连通性**：运行 `curl -sf http://127.0.0.1:8788/api/health` 确认返回 `"status": "ok"`，并告知用户可在浏览器打开 `http://127.0.0.1:8788` 查看实时看板或添加服务器。
 
 </details>
-
-### 方式二：终端手动一行启动（适合人类开发者）
-
-**推荐做法（直接用打包好前端的 Release Wheel，无需安装 Node.js）：**
-
-```bash
-uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl" npu-top serve
-```
-
-启动后直接用浏览器打开 `http://127.0.0.1:8788` 即可看到 Web 监控台！
-
-**从 Git 源码构建启动（需要本机装有 Node.js `>= 22.13` 用于编译前端）：**
-
-```bash
-# 直接通过 uvx 从 Git 拉取构建并启动
-uvx --from git+https://github.com/mindie-agent/npu-top@main npu-top serve
-
-# 或者克隆源码到本地构建 Wheel
-git clone https://github.com/mindie-agent/npu-top.git
-cd npu-top
-./scripts/build_wheel.sh
-```
 
 ---
 

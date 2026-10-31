@@ -31,7 +31,7 @@ When a team shares a fleet of Ascend NPU servers, everyone asks the same questio
 - **Fast When You're Watching, Gentle When You're Not**: Refreshes every 1s / 5s / 10s / 30s while the web dashboard is open, and automatically drops back to 120s background polling when no browser tab is active.
 - **90-Day Trends & Heatmaps with a Hard Disk Cap**: Stores 15-minute host and per-card summaries for 1-hour to 90-day trend charts and 2-hour bucketed heatmaps (CPU, memory, NPU, HBM, and per-card AICore), while strictly capping the SQLite file at `1024 MB` (`NFM_SQLITE_MAX_MB`).
 - **Configure Access Once**: Share SSH authentication with remote-dev and coordinator. Remote-dev stores passwords in the current user's private local file and installs a public key where supported; password-only hosts remain usable. The monitor database stores only an authentication reference.
-- **Ready-to-Use CLI & MCP Tools for AI Agents**: Provides 5 read-only MCP tools and matching CLI subcommands so your agent can screen candidate hosts from memory (`cache`) or trigger a fresh probe (`live`) without ever touching raw SSH commands or credentials.
+- **Ready-to-Use CLI & MCP Tools for AI Agents**: Provides 6 read-only MCP tools (`npu_status`, `server_status`, `list_mounts`, `find_npu_capacity`, `npu_telemetry_window`, `list_npu_servers`) and matching CLI subcommands so your agent can screen candidate hosts from memory (`cache`) or trigger a fresh probe (`live`) without ever touching raw SSH commands or credentials.
 
 > [!IMPORTANT]
 > **Core Rule: `npu-top` Observes Traffic — It Does Not Reserve Parking Spots (`allocation_authority: false`)**
@@ -41,7 +41,7 @@ When a team shares a fleet of Ascend NPU servers, everyone asks the same questio
 flowchart LR
     User["👀 Browser Dashboard & 🤖 AI Coding Agent"]
     Server["⚡ npu-top serve (127.0.0.1:8788)<br/>In-Memory Live Cache + Bounded SQLite History"]
-    MCP["🔌 npu-top CLI / MCP<br/>(5 Read-Only Discovery Tools)"]
+    MCP["🔌 npu-top CLI / MCP<br/>(6 Read-Only Discovery Tools)"]
     SSH["🔑 Shared remote-dev SSH Authentication"]
     Hosts["🖥️ Bare-Metal Ascend NPU Servers<br/>(910B / A3 910C / A5 950)"]
 
@@ -56,9 +56,7 @@ flowchart LR
 
 ## Quick Start
 
-### Option 1: One-Sentence Setup via Your AI Agent (Recommended)
-
-Copy and paste this sentence to Claude Code, Codex, Kimi Code, or Cursor to let your agent launch the local collector and register the MCP tools automatically:
+Copy and paste this sentence to Claude Code, Codex, Kimi Code, or DeepSeek Harness (DSH) so your AI Agent launches the local collector and registers the MCP tools automatically:
 
 ```text
 Please install and configure https://github.com/mindie-agent/npu-top for me
@@ -127,28 +125,6 @@ If you are an AI Agent receiving the prompt above, follow these steps to install
 4. **Verify Health**: Run `curl -sf http://127.0.0.1:8788/api/health` to confirm `"status": "ok"`, and let the user know they can open `http://127.0.0.1:8788` in their browser or ask you to check NPU availability across servers.
 
 </details>
-
-### Option 2: One-Line Terminal Launch for Humans
-
-**Recommended (run directly from the pre-built GitHub Release wheel — no local Node.js needed):**
-
-```bash
-uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl" npu-top serve
-```
-
-Then open `http://127.0.0.1:8788` in your browser.
-
-**Build from Git or Source (requires Node.js `>= 22.13` to compile the frontend):**
-
-```bash
-# Build and launch directly from Git via uvx
-uvx --from git+https://github.com/mindie-agent/npu-top@main npu-top serve
-
-# Or clone the repository and build a wheel locally
-git clone https://github.com/mindie-agent/npu-top.git
-cd npu-top
-./scripts/build_wheel.sh
-```
 
 ---
 
