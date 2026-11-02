@@ -70,12 +70,12 @@ If you are an AI Agent receiving the prompt above, follow these steps to install
 1. **Check Prerequisites**: Verify Python `>= 3.11`, `uv`, and system `ssh` / `ssh-keygen` are available.
 2. **Start the Local `npu-top serve` Collector in the Background** (binds to `http://127.0.0.1:8788` by default):
    ```bash
-   uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl" npu-top serve
+   uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.3.1/npu_top-0.3.1-py3-none-any.whl" npu-top serve
    ```
 3. **Register the `npu-top` MCP Server in Your Host Client**:
    - **Claude Code** (add to `.mcp.json` or run via CLI):
      ```bash
-     claude mcp add npu-top -e MINDIE_TOP_URL=http://127.0.0.1:8788 -- uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl" npu-top mcp
+     claude mcp add npu-top -e MINDIE_TOP_URL=http://127.0.0.1:8788 -- uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.3.1/npu_top-0.3.1-py3-none-any.whl" npu-top mcp
      ```
    - **Cursor** (`.cursor/mcp.json`) or standard `.mcp.json`:
      ```json
@@ -85,7 +85,7 @@ If you are an AI Agent receiving the prompt above, follow these steps to install
            "command": "uvx",
            "args": [
              "--from",
-             "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl",
+             "https://github.com/mindie-agent/npu-top/releases/download/v0.3.1/npu_top-0.3.1-py3-none-any.whl",
              "npu-top",
              "mcp"
            ],
@@ -104,7 +104,7 @@ If you are an AI Agent receiving the prompt above, follow these steps to install
            "command": "uvx",
            "args": [
              "--from",
-             "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl",
+             "https://github.com/mindie-agent/npu-top/releases/download/v0.3.1/npu_top-0.3.1-py3-none-any.whl",
              "npu-top",
              "mcp"
            ],
@@ -119,7 +119,7 @@ If you are an AI Agent receiving the prompt above, follow these steps to install
      ```toml
      [mcp_servers.npu_top]
      command = "uvx"
-     args = ["--from", "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl", "npu-top", "mcp"]
+     args = ["--from", "https://github.com/mindie-agent/npu-top/releases/download/v0.3.1/npu_top-0.3.1-py3-none-any.whl", "npu-top", "mcp"]
      env = { MINDIE_TOP_URL = "http://127.0.0.1:8788" }
      ```
 4. **Verify Health**: Run `curl -sf http://127.0.0.1:8788/api/health` to confirm `"status": "ok"`, and let the user know they can open `http://127.0.0.1:8788` in their browser or ask you to check NPU availability across servers.

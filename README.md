@@ -70,12 +70,12 @@ flowchart LR
 1. **检查基础依赖**：确认本机有 Python `>= 3.11`、`uv` 以及系统的 `ssh` / `ssh-keygen`。
 2. **后台启动本地 `npu-top serve` 监控服务**（默认监听本地回环 `http://127.0.0.1:8788`）：
    ```bash
-   uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl" npu-top serve
+   uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.3.1/npu_top-0.3.1-py3-none-any.whl" npu-top serve
    ```
 3. **在当前宿主客户端注册 `npu-top` MCP Server**：
    - **Claude Code**（写入 `.mcp.json` 或直接运行命令）：
      ```bash
-     claude mcp add npu-top -e MINDIE_TOP_URL=http://127.0.0.1:8788 -- uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl" npu-top mcp
+     claude mcp add npu-top -e MINDIE_TOP_URL=http://127.0.0.1:8788 -- uvx --from "https://github.com/mindie-agent/npu-top/releases/download/v0.3.1/npu_top-0.3.1-py3-none-any.whl" npu-top mcp
      ```
    - **Cursor**（写入 `.cursor/mcp.json`）或通用 `.mcp.json`：
      ```json
@@ -85,7 +85,7 @@ flowchart LR
            "command": "uvx",
            "args": [
              "--from",
-             "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl",
+             "https://github.com/mindie-agent/npu-top/releases/download/v0.3.1/npu_top-0.3.1-py3-none-any.whl",
              "npu-top",
              "mcp"
            ],
@@ -104,7 +104,7 @@ flowchart LR
            "command": "uvx",
            "args": [
              "--from",
-             "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl",
+             "https://github.com/mindie-agent/npu-top/releases/download/v0.3.1/npu_top-0.3.1-py3-none-any.whl",
              "npu-top",
              "mcp"
            ],
@@ -119,7 +119,7 @@ flowchart LR
      ```toml
      [mcp_servers.npu_top]
      command = "uvx"
-     args = ["--from", "https://github.com/mindie-agent/npu-top/releases/download/v0.3.0/npu_top-0.3.0-py3-none-any.whl", "npu-top", "mcp"]
+     args = ["--from", "https://github.com/mindie-agent/npu-top/releases/download/v0.3.1/npu_top-0.3.1-py3-none-any.whl", "npu-top", "mcp"]
      env = { MINDIE_TOP_URL = "http://127.0.0.1:8788" }
      ```
 4. **验证连通性**：运行 `curl -sf http://127.0.0.1:8788/api/health` 确认返回 `"status": "ok"`，并告知用户可在浏览器打开 `http://127.0.0.1:8788` 查看实时看板或添加服务器。
