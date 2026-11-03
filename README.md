@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/mindie-agent/npu-top/releases"><img src="https://img.shields.io/badge/Release-v0.3.1-blue" alt="Release v0.3.1"></a>
   <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/Interface-Web%20UI%20%7C%20CLI%20%7C%20MCP-00ADD8" alt="Web UI, CLI & MCP">
   <img src="https://img.shields.io/badge/Ascend-910B%20%7C%20A3%20(910C)%20%7C%20A5%20(950)-FF6F00" alt="Ascend NPU">
