@@ -315,3 +315,85 @@ def test_inventory_updates_reference_before_access_check(tmp_path):
     assert result["state"] == "completed" and seen == [reference]
     assert db.get_server(SERVER["id"])["auth_ref"] == reference
     db.close()
+
+
+def test_inventory_sqlite_register_error_is_failed_not_unknown():
+    db = SimpleNamespace(
+        list_servers=lambda: [],
+        upsert_server=lambda *_a, **_k: (_ for _ in ()).throw(sqlite3.OperationalError("disk I/O error")),
+    )
+    adapter = SimpleNamespace(connect=lambda *_a, **_k: {"ok": True})
+    app = SimpleNamespace(db=db, adapter=adapter, scheduler=SimpleNamespace(collect_now=lambda _: None))
+    result = import_inventory(app, [{**SERVER}])
+    receipt = result["results"][0]
+    assert receipt["registration"] == "failed"
+    assert receipt["failure"]["stage"] == "register"
+    assert receipt["failure"]["error_type"] == "OperationalError"
+    assert "disk I/O error" in receipt["failure"]["error"]
+    assert receipt["auth"]["state"] == "not_started"
+
+
+def test_inventory_connect_oserror_is_not_ready_not_unknown(tmp_path):
+    db = Database(tmp_path / "monitor.sqlite3")
+    db.initialize()
+    adapter = SimpleNamespace(
+        connect=lambda *_a, **_k: (_ for _ in ()).throw(OSError("SSH 启动失败")),
+    )
+    app = SimpleNamespace(db=db, adapter=adapter, scheduler=SimpleNamespace(collect_now=lambda _: None))
+    result = import_inventory(app, [{**SERVER}])
+    receipt = result["results"][0]
+    assert receipt["registration"] == "completed"
+    assert receipt["auth"]["ok"] is False
+    assert receipt["auth"]["state"] == "not_ready"
+    assert receipt["auth"]["error_type"] == "OSError"
+    assert receipt["failure"]["stage"] == "bootstrap"
+    db.close()
+
+
+def test_inventory_uncertain_connect_receipt_stays_unknown(tmp_path):
+    db = Database(tmp_path / "monitor.sqlite3")
+    db.initialize()
+    auth = {
+        "ok": False, "state": "unknown", "submission_state": "uncertain",
+        "error": "connection lost",
+    }
+    adapter = SimpleNamespace(connect=lambda *_a, **_k: auth)
+    app = SimpleNamespace(db=db, adapter=adapter, scheduler=SimpleNamespace(collect_now=lambda _: None))
+    result = import_inventory(app, [{**SERVER}])
+    receipt = result["results"][0]
+    assert receipt["registration"] == "completed"
+    assert receipt["auth"]["state"] == "unknown"
+    assert receipt["auth"]["submission_state"] == "uncertain"
+    db.close()
+
+
+def test_batch_sqlite_register_error_is_failed_not_unknown(monkeypatch):
+    with console(seed_server=False) as (db, host, port):
+        monkeypatch.setattr(
+            db, "upsert_server",
+            lambda *_a, **_k: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked")),
+        )
+        status, _, payload = _json(host, port, "POST", "/api/servers/batch", {"servers": [SERVER]})
+        assert status == 207
+        receipt = payload["results"][0]
+        assert receipt["registration"] == "failed"
+        assert receipt["failure"]["stage"] == "register"
+        assert receipt["failure"]["error_type"] == "OperationalError"
+        assert receipt["auth"]["state"] == "not_started"
+
+
+def test_batch_connect_oserror_is_not_ready_not_unknown(monkeypatch):
+    from test_console_routes import StubAdapter
+
+    monkeypatch.setattr(
+        StubAdapter, "connect",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("SSH 启动失败")),
+    )
+    with console(seed_server=False) as (_db, host, port):
+        status, _, payload = _json(host, port, "POST", "/api/servers/batch", {"servers": [SERVER]})
+        assert status == 207
+        receipt = payload["results"][0]
+        assert receipt["registration"] == "completed"
+        assert receipt["auth"]["state"] == "not_ready"
+        assert receipt["auth"]["error_type"] == "OSError"
+        assert receipt["failure"]["stage"] == "bootstrap"

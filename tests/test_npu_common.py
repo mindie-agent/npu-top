@@ -10,7 +10,11 @@ from types import SimpleNamespace
 from unittest import mock
 
 from npu_top.npu_smi import parse_npu_common
-from npu_top.probe import HostProbe, build_frequency_script, frequency_probe_plan
+from npu_top.probe import (
+    DCMI_INNER_SECONDS, DCMI_KILL_AFTER_SECONDS, DCMI_CLEANUP_GRACE_SECONDS,
+    DCMI_OUTER_TIMEOUT_SECONDS, HostProbe, build_frequency_script,
+    dcmi_probe_plan, frequency_probe_plan,
+)
 
 
 FAST_OUTPUT = (
@@ -160,6 +164,16 @@ class FrequencyScriptTests(unittest.TestCase):
         self.assertEqual(frequency_probe_plan(20), (8, 13))
         self.assertEqual(frequency_probe_plan(10), (5, 10))
         self.assertIsNone(frequency_probe_plan(5))
+
+    def test_dcmi_outer_timeout_is_inner_plus_kill_after_plus_grace(self) -> None:
+        self.assertEqual(DCMI_OUTER_TIMEOUT_SECONDS, 9)
+        self.assertEqual(
+            DCMI_INNER_SECONDS + DCMI_KILL_AFTER_SECONDS + DCMI_CLEANUP_GRACE_SECONDS, 9,
+        )
+        self.assertEqual(dcmi_probe_plan(20), (5, 9))
+        self.assertEqual(dcmi_probe_plan(9), (5, 9))
+        self.assertIsNone(dcmi_probe_plan(8))
+        self.assertIsNone(dcmi_probe_plan(5))
 
 
 class ProbeFrequencyMergeTests(unittest.TestCase):
@@ -325,7 +339,7 @@ class ProbeFrequencyMergeTests(unittest.TestCase):
 
         python_run.assert_called_once()
         self.assertEqual(python_run.call_args.args[2], ["--cards", "0,1", "--device", "0"])
-        self.assertEqual(python_run.call_args.args[3], 8)
+        self.assertEqual(python_run.call_args.args[3], DCMI_INNER_SECONDS)
         self.assertIn("AICORE_FREQREDUC_CAUSE", python_run.call_args.args[1])
         self.assertEqual(snapshot["dcmi"]["state"], "observed")
         self.assertEqual(snapshot["devices"][0]["dcmi_freq_reduc"]["raw_mask"], 1)
@@ -347,6 +361,49 @@ class ProbeFrequencyMergeTests(unittest.TestCase):
         self.assertEqual(snapshot["summary"]["npu_count"], 2)
         self.assertEqual(snapshot["dcmi"]["state"], "unavailable")
         self.assertEqual(snapshot["dcmi"]["error_type"], "JSONDecodeError")
+
+    def test_configured_timeout_of_eight_skips_dcmi_for_cleanup_grace(self) -> None:
+        probe = self._probe(timeout=8)
+        calls: list[str] = []
+
+        def fake_run_script(_server, script, timeout):
+            calls.append(script)
+            return subprocess.CompletedProcess([], 0, FAST_OUTPUT, "")
+
+        with mock.patch.object(probe, "_run_script", side_effect=fake_run_script), \
+             mock.patch.object(probe, "_run_python") as python_run:
+            snapshot = probe.collect({"id": "a2", "name": "a2", "host": "127.0.0.1"}, False)
+
+        python_run.assert_not_called()
+        self.assertEqual(snapshot["dcmi"]["state"], "unavailable")
+        self.assertEqual(snapshot["dcmi"]["error_type"], "ConfiguredTimeoutTooSmall")
+        self.assertEqual(snapshot["dcmi"]["required_timeout"], DCMI_OUTER_TIMEOUT_SECONDS)
+        self.assertEqual(snapshot["dcmi"]["configured_timeout"], 8)
+
+    def test_dcmi_python_ssh_outer_covers_inner_kill_and_grace(self) -> None:
+        probe = self._probe()
+        seen: dict[str, object] = {}
+
+        def fake_capture(_access, _server, command, *, timeout_ms, input=None, **_kwargs):
+            seen["command"] = list(command)
+            seen["timeout_ms"] = timeout_ms
+            return SimpleNamespace(
+                returncode=0, stdout="{}", stderr="", cancelled=False, cleanup_error=None,
+            )
+
+        with mock.patch("npu_top.probe.capture_ssh", side_effect=fake_capture):
+            probe._run_python({"id": "a2"}, "print(1)\n", ["--cards", "0"], DCMI_INNER_SECONDS)
+
+        command = seen["command"]
+        self.assertEqual(command[:5], [
+            "timeout", "--signal=TERM",
+            f"--kill-after={DCMI_KILL_AFTER_SECONDS}", str(DCMI_INNER_SECONDS), "python3",
+        ])
+        self.assertEqual(seen["timeout_ms"], DCMI_OUTER_TIMEOUT_SECONDS * 1000)
+        self.assertGreaterEqual(
+            seen["timeout_ms"],
+            (DCMI_INNER_SECONDS + DCMI_KILL_AFTER_SECONDS + DCMI_CLEANUP_GRACE_SECONDS) * 1000,
+        )
 
 
 if __name__ == "__main__":

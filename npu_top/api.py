@@ -1,7 +1,7 @@
 """Loopback HTTP API and static console server for `npu-top`.
 
 [Role] Serves observation-only REST endpoints (`/api/health`, `/api/overview`, `/api/agent/*`, `/api/servers`, `/api/history`) and bundled web UI.
-[Invariants] Refuses non-loopback bind addresses; stamps `/api/*` responses with `X-MindIE-Top-Contract: observation-only`; distinguishes `completed`, `failed`, and `unknown` registration/bootstrap stages.
+[Invariants] Refuses non-loopback bind addresses; stamps `/api/*` responses with `X-MindIE-Top-Contract: observation-only`; distinguishes `completed`, `failed`, and `unknown` registration/bootstrap stages, reserving `unknown` for uncertain irreversible remote writes.
 [Timeouts & Locks] Delegates live collection waits (`timeout` up to `60s`) to `AdaptiveScheduler` and closes thread-local SQLite connections per request thread.
 [Side-Effect Policy] Loopback HTTP serving, SQLite server registry updates, and shared remote-dev credential setup on `/api/servers/batch`.
 """
@@ -52,6 +52,37 @@ def normalize_tags(value: Any) -> list[str]:
             tags.append(tag)
             seen.add(key)
     return tags
+
+
+def apply_inventory_exception(receipt: dict[str, Any], stage: str, exc: BaseException) -> None:
+    """Map local inventory exceptions; `unknown` only for uncertain remote writes.
+
+    Local SQLite registration is `failed`. A connect() exception without
+    `submission_state == "uncertain"` is `not_ready`. An existing connect()
+    receipt that already recorded uncertain submission is passed through as
+    `unknown` rather than rewritten.
+    """
+    failure = receipt.setdefault("failure", {})
+    failure["stage"] = stage
+    failure["error_type"] = type(exc).__name__
+    failure.setdefault("error", str(exc))
+    if stage == "register":
+        receipt["registration"] = "failed"
+        return
+    if stage != "bootstrap":
+        return
+    auth = receipt.get("auth")
+    if isinstance(auth, dict) and auth.get("submission_state") == "uncertain":
+        receipt["auth"] = {**auth, "ok": False, "state": "unknown"}
+        return
+    if isinstance(auth, dict) and auth.get("state") not in (None, "not_started"):
+        return
+    receipt["auth"] = {
+        "ok": False,
+        "state": "not_ready",
+        "error_type": type(exc).__name__,
+        "error": str(exc),
+    }
 
 
 class App:
@@ -535,11 +566,8 @@ class Handler(BaseHTTPRequestHandler):
                 reference = capture_failure(exc, "server_registration_failed")
                 receipt["failure"] = {"stage": stage, "error_type": type(exc).__name__,
                                       "error": str(exc), "diagnostic_ref": reference}
-                if stage == "register":
-                    receipt["registration"] = "unknown"
-                elif stage == "bootstrap":
-                    receipt["auth"] = {"ok": False, "state": "unknown", "error": str(exc)}
-                elif stage == "validate":
+                apply_inventory_exception(receipt, stage, exc)
+                if stage == "validate":
                     receipt["auth"]["error"] = str(exc)
             results.append(receipt)
         payload: dict[str, Any] = {"results": results}

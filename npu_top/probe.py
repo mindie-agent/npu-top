@@ -2,7 +2,7 @@
 
 [Role] Executes bounded remote shell probes over SSH and parses raw sections into structured host snapshots.
 [Invariants] Observation-only; `npu_info_rc` gates NPU health while optional `usages`/Docker/process-detail failures degrade gracefully without hiding NPU errors.
-[Timeouts & Locks] Remote `npu-smi` commands use inner `timeout 8` and Docker commands use `timeout 5`/`timeout 10`; outer SSH timeout is `max(ssh_timeout + 25, 45)` when infrastructure is included (`>= sum(inner_budgets) + grace`). The optional `-t common` frequency pass has an 8 s inner budget, per-card `timeout 2`, a 3 s cleanup grace, and outer `budget + 2 + 3` (never a `min` that truncates the inner budget); a killed pass keeps any complete card sections already printed. The optional DCMI pass is one bounded `python3 -` helper (8 s) and is skipped with a structured status when the configured SSH timeout is smaller.
+[Timeouts & Locks] Remote `npu-smi` commands use inner `timeout 8` and Docker commands use `timeout 5`/`timeout 10`; outer SSH timeout is `max(ssh_timeout + 25, 45)` when infrastructure is included (`>= sum(inner_budgets) + grace`). The optional `-t common` frequency pass has an 8 s inner budget, per-card `timeout 2`, a 3 s cleanup grace, and outer `budget + 2 + 3` (never a `min` that truncates the inner budget); a killed pass keeps any complete card sections already printed. The optional DCMI pass is a bounded `python3 -` helper: inner `timeout 5 --kill-after=1`, 3 s cleanup grace, outer `5 + 1 + 3 = 9` s, skipped with `ConfiguredTimeoutTooSmall` when the configured SSH timeout cannot cover that sum.
 [Side-Effect Policy] Read-only remote SSH probes (`/proc`, `df`, `findmnt`, `docker ps/stats/info`, `npu-smi info`, `npu-smi info -t common`, DCMI `dcmi_init` + `dcmi_get_device_info`); never mutates remote host state or submits NPU work.
 """
 from __future__ import annotations
@@ -58,7 +58,13 @@ FREQUENCY_CLEANUP_GRACE_SECONDS = 3
 FREQUENCY_OUTER_TIMEOUT_SECONDS = (
     FREQUENCY_BUDGET_SECONDS + FREQUENCY_CARD_TIMEOUT_SECONDS + FREQUENCY_CLEANUP_GRACE_SECONDS
 )
-DCMI_TIMEOUT_SECONDS = 8
+DCMI_INNER_SECONDS = 5
+DCMI_KILL_AFTER_SECONDS = 1
+DCMI_CLEANUP_GRACE_SECONDS = 3
+DCMI_OUTER_TIMEOUT_SECONDS = (
+    DCMI_INNER_SECONDS + DCMI_KILL_AFTER_SECONDS + DCMI_CLEANUP_GRACE_SECONDS
+)
+DCMI_TIMEOUT_SECONDS = DCMI_OUTER_TIMEOUT_SECONDS
 FREQUENCY_SCRIPT = r'''set +e
 nfm_start=$SECONDS
 nfm_rc_all=0
@@ -288,6 +294,18 @@ def frequency_probe_plan(configured_timeout: int) -> tuple[int, int] | None:
     return budget, budget + FREQUENCY_CARD_TIMEOUT_SECONDS + FREQUENCY_CLEANUP_GRACE_SECONDS
 
 
+def dcmi_probe_plan(configured_timeout: int) -> tuple[int, int] | None:
+    """Return `(inner_seconds, outer_timeout)` with outer = inner + kill_after + grace.
+
+    The optional pass is skipped when the configured SSH timeout cannot cover
+    the remote python helper, SIGKILL follow-up, and cleanup grace. The outer
+    timeout never truncates the inner budget.
+    """
+    if int(configured_timeout) < DCMI_OUTER_TIMEOUT_SECONDS:
+        return None
+    return DCMI_INNER_SECONDS, DCMI_OUTER_TIMEOUT_SECONDS
+
+
 def _decode_process_field(value: str) -> str | None:
     if not value:
         return None
@@ -440,13 +458,22 @@ class HostProbe:
         )
 
     def _run_python(
-        self, server: dict[str, Any], source: str, args: list[str], timeout: int,
+        self, server: dict[str, Any], source: str, args: list[str], inner_seconds: int,
     ) -> RemoteCompleted:
-        """Bound the remote getter before the SSH deadline (no remote file write)."""
+        """Bound the remote getter before the SSH deadline (no remote file write).
+
+        Outer SSH timeout is `inner + kill_after + cleanup_grace`, never a
+        `min` that truncates the inner `timeout` budget.
+        """
+        inner = max(1, int(inner_seconds))
+        outer = inner + DCMI_KILL_AFTER_SECONDS + DCMI_CLEANUP_GRACE_SECONDS
         return capture_ssh(
-            self.adapter, server, ["timeout", "--signal=TERM", "--kill-after=1",
-                     str(max(1, timeout - 3)), "python3", "-", *args],
-            timeout_ms=timeout * 1000,
+            self.adapter, server, [
+                "timeout", "--signal=TERM",
+                f"--kill-after={DCMI_KILL_AFTER_SECONDS}", str(inner),
+                "python3", "-", *args,
+            ],
+            timeout_ms=outer * 1000,
             input=source.replace("\r\n", "\n").encode("utf-8"),
         )
 
@@ -597,13 +624,15 @@ class HostProbe:
                         if not isinstance(npu_id, bool) and isinstance(npu_id, int) and npu_id >= 0})
         if not cards:
             return {"state": "not_applicable", "stage": "dcmi"}
-        if self.timeout < DCMI_TIMEOUT_SECONDS:
+        plan = dcmi_probe_plan(self.timeout)
+        if plan is None:
             return {
                 "state": "unavailable", "stage": "dcmi",
                 "error_type": "ConfiguredTimeoutTooSmall",
                 "configured_timeout": self.timeout,
-                "required_timeout": DCMI_TIMEOUT_SECONDS,
+                "required_timeout": DCMI_OUTER_TIMEOUT_SECONDS,
             }
+        inner_seconds, _outer_timeout = plan
         try:
             source = Path(dcmi_telemetry.__file__).read_text(encoding="utf-8")
         except TimeoutError:
@@ -615,7 +644,7 @@ class HostProbe:
             result = self._run_python(
                 server, source,
                 ["--cards", ",".join(str(card) for card in cards), "--device", "0"],
-                DCMI_TIMEOUT_SECONDS,
+                inner_seconds,
             )
         except (subprocess.TimeoutExpired, TimeoutError) as exc:
             return {"state": "unavailable", "stage": "dcmi",
