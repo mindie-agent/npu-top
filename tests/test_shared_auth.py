@@ -16,6 +16,7 @@ from remote_dev.auth import askpass
 from remote_dev.core.endpoint import Endpoint
 from remote_dev.core.errors import RemoteExecutionError
 from remote_dev.core.ssh_transport import RemoteBytesCompleted, SshLaunch
+from npu_top.api import apply_inventory_exception
 from npu_top.db import Database
 from npu_top.device_adapter import DeviceAdapter
 from npu_top.probe import HostProbe
@@ -397,3 +398,68 @@ def test_batch_connect_oserror_is_not_ready_not_unknown(monkeypatch):
         assert receipt["auth"]["state"] == "not_ready"
         assert receipt["auth"]["error_type"] == "OSError"
         assert receipt["failure"]["stage"] == "bootstrap"
+
+
+def test_apply_inventory_exception_does_not_downgrade_timeout_error():
+    register = {"registration": "not_started", "auth": {"ok": False, "state": "not_started"}}
+    with pytest.raises(TimeoutError, match="sqlite busy deadline"):
+        apply_inventory_exception(register, "register", TimeoutError("sqlite busy deadline"))
+    assert register["registration"] == "not_started"
+    assert "failure" not in register
+
+    bootstrap = {"registration": "completed", "auth": {"ok": False, "state": "not_started"}}
+    with pytest.raises(TimeoutError, match="connect deadline"):
+        apply_inventory_exception(bootstrap, "bootstrap", TimeoutError("connect deadline"))
+    assert bootstrap["auth"]["state"] == "not_started"
+    assert "failure" not in bootstrap
+
+
+def test_inventory_register_timeout_is_not_failed():
+    db = SimpleNamespace(
+        list_servers=lambda: [],
+        upsert_server=lambda *_a, **_k: (_ for _ in ()).throw(TimeoutError("sqlite busy deadline")),
+    )
+    adapter = SimpleNamespace(connect=lambda *_a, **_k: {"ok": True})
+    app = SimpleNamespace(db=db, adapter=adapter, scheduler=SimpleNamespace(collect_now=lambda _: None))
+    with pytest.raises(TimeoutError, match="sqlite busy deadline"):
+        import_inventory(app, [{**SERVER}])
+
+
+def test_inventory_connect_timeout_is_not_not_ready(tmp_path):
+    db = Database(tmp_path / "monitor.sqlite3")
+    db.initialize()
+    adapter = SimpleNamespace(
+        connect=lambda *_a, **_k: (_ for _ in ()).throw(TimeoutError("connect deadline")),
+    )
+    app = SimpleNamespace(db=db, adapter=adapter, scheduler=SimpleNamespace(collect_now=lambda _: None))
+    with pytest.raises(TimeoutError, match="connect deadline"):
+        import_inventory(app, [{**SERVER}])
+    db.close()
+
+
+def test_batch_register_timeout_is_storage_timeout_not_failed(monkeypatch):
+    with console(seed_server=False) as (db, host, port):
+        monkeypatch.setattr(
+            db, "upsert_server",
+            lambda *_a, **_k: (_ for _ in ()).throw(TimeoutError("sqlite busy deadline")),
+        )
+        status, _, payload = _json(host, port, "POST", "/api/servers/batch", {"servers": [SERVER]})
+        assert status == 503
+        assert payload["error_type"] == "TimeoutError"
+        assert "results" not in payload
+        assert payload["error"] == "Monitor storage timed out; retry later"
+
+
+def test_batch_connect_timeout_is_storage_timeout_not_not_ready(monkeypatch):
+    from test_console_routes import StubAdapter
+
+    monkeypatch.setattr(
+        StubAdapter, "connect",
+        lambda *_a, **_k: (_ for _ in ()).throw(TimeoutError("connect deadline")),
+    )
+    with console(seed_server=False) as (_db, host, port):
+        status, _, payload = _json(host, port, "POST", "/api/servers/batch", {"servers": [SERVER]})
+        assert status == 503
+        assert payload["error_type"] == "TimeoutError"
+        assert "results" not in payload
+        assert payload["error"] == "Monitor storage timed out; retry later"

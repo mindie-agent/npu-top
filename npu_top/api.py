@@ -57,11 +57,14 @@ def normalize_tags(value: Any) -> list[str]:
 def apply_inventory_exception(receipt: dict[str, Any], stage: str, exc: BaseException) -> None:
     """Map local inventory exceptions; `unknown` only for uncertain remote writes.
 
+    TimeoutError is never remapped to `failed`/`not_ready`; it must propagate.
     Local SQLite registration is `failed`. A connect() exception without
     `submission_state == "uncertain"` is `not_ready`. An existing connect()
     receipt that already recorded uncertain submission is passed through as
     `unknown` rather than rewritten.
     """
+    if isinstance(exc, TimeoutError):
+        raise exc
     failure = receipt.setdefault("failure", {})
     failure["stage"] = stage
     failure["error_type"] = type(exc).__name__
@@ -432,6 +435,13 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/collect":
                 self.app.scheduler.collect_now()
                 return self.json_response({"accepted": True}, HTTPStatus.ACCEPTED)
+        except TimeoutError as exc:
+            reference = capture_failure(exc, "storage_timeout")
+            return self.json_response(
+                {"error": "Monitor storage timed out; retry later",
+                 "error_type": type(exc).__name__, "diagnostic_ref": reference},
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
         except ValueError as exc:
             return self.json_response({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         except Exception as exc:  # noqa: BLE001
@@ -562,6 +572,8 @@ class Handler(BaseHTTPRequestHandler):
                     stage = "record_auth_failure"
                     self.app.db.record_failure(server["id"], str(auth.get("error")),
                                                operation.summary()["duration_ms"])
+            except TimeoutError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 reference = capture_failure(exc, "server_registration_failed")
                 receipt["failure"] = {"stage": stage, "error_type": type(exc).__name__,

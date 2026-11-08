@@ -82,6 +82,8 @@ def import_inventory(app, inventory):
                 db.record_failure(server_record["id"], str(auth.get("error") or "SSH 认证不可用"),
                                   operation.summary()["duration_ms"])
             existing[endpoint] = server_record
+        except TimeoutError:
+            raise
         except Exception as exc:
             result["failure"] = {"stage": stage, "error_type": type(exc).__name__, "error": str(exc)}
             apply_inventory_exception(result, stage, exc)
