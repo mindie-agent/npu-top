@@ -4,8 +4,9 @@
 window with per-device p50/p95, peaks, scheduled/field coverage, throttling and explicit
 `measurement_limitations`.
 [Invariants] Uses only observed getters finished inside the window; coverage requires
-declared sample_index/phase and is `null` otherwise; absent/failed data stays `None` and
-is never replaced by temperature inference, fabricated zeros, or elapsed-bucket estimates.
+declared sample_index/phase and is `null` otherwise, including when `cards_json` is
+unusable; absent/failed data stays `None` and is never replaced by temperature inference,
+fabricated zeros, elapsed-bucket estimates, or an all-card match for a bad card filter.
 [Timeouts & Locks] Pure in-memory aggregation over caller-supplied rows; zero I/O or locks.
 [Side-Effect Policy] Side-effect free.
 """
@@ -112,7 +113,12 @@ def _scheduled_key(
     if not isinstance(run_id, str) or isinstance(index, bool) or not isinstance(index, int):
         return None
     run = runs.get(run_id)
-    if run is None or _cards_json_unparseable(run):
+    npu_id = row.get("npu_id")
+    if (
+        run is None
+        or isinstance(npu_id, bool) or not isinstance(npu_id, int)
+        or not _run_has_card(run, npu_id)
+    ):
         return None
     bounds = run_index_range(run, start_ns, end_ns)
     if bounds is None or not bounds[0] <= index <= bounds[1]:
@@ -162,35 +168,67 @@ def _getter_status_counts(rows: list[dict[str, Any]]) -> dict[str, dict[str, int
     return counts
 
 
-def _cards_json_unparseable(run: dict[str, Any]) -> bool:
+def _card_filter(run: dict[str, Any]) -> tuple[frozenset[int] | None, str | None]:
+    """Return `(card_ids, error)`.
+
+    `card_ids is None` with no error means no filter (the run applies to every card).
+    An empty frozenset is an explicit zero-card filter. Parse failures and
+    successfully decoded non-id lists are errors and must not match every card.
+    """
     raw = run.get("cards_json")
-    if not raw:
-        return False
-    try:
-        json.loads(raw)
-    except (TypeError, json.JSONDecodeError):
-        return True
-    return False
+    if raw is None or raw == "":
+        return None, None
+    if isinstance(raw, (bytes, bytearray, str)):
+        try:
+            cards = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return None, "cards_json_unparseable"
+    elif isinstance(raw, list):
+        cards = raw
+    else:
+        return None, "cards_json_invalid_filter"
+    if not isinstance(cards, list):
+        return None, "cards_json_invalid_filter"
+    ids: list[int] = []
+    for item in cards:
+        if isinstance(item, bool) or not isinstance(item, int):
+            return None, "cards_json_invalid_filter"
+        ids.append(item)
+    return frozenset(ids), None
 
 
-def _unparseable_card_run_ids(
+def _unusable_card_runs(
     runs: dict[str, dict[str, Any]], start_ns: int, end_ns: int,
-) -> list[str]:
-    return [
-        run_id for run_id, run in sorted(runs.items())
-        if _cards_json_unparseable(run) and run_index_range(run, start_ns, end_ns) is not None
-    ]
+) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    for run_id, run in sorted(runs.items()):
+        if run_index_range(run, start_ns, end_ns) is None:
+            continue
+        _ids, error = _card_filter(run)
+        if error:
+            found.append((run_id, error))
+    return found
+
+
+def _unusable_cards_limitation(items: list[tuple[str, str]], *, for_device: bool) -> str:
+    grouped: dict[str, list[str]] = {}
+    for run_id, error in items:
+        grouped.setdefault(error, []).append(run_id)
+    detail = "; ".join(
+        f"{error} run(s) " + ", ".join(run_ids) for error, run_ids in sorted(grouped.items())
+    )
+    where = "this device's scheduled coverage" if for_device else "scheduled coverage"
+    return (
+        f"{detail} are excluded from {where} instead of matching every card; "
+        "scheduled coverage is null, not full."
+    )
 
 
 def _run_has_card(run: dict[str, Any], npu_id: int) -> bool:
-    raw = run.get("cards_json")
-    if not raw:
-        return True
-    try:
-        cards = json.loads(raw)
-    except (TypeError, json.JSONDecodeError):
+    ids, error = _card_filter(run)
+    if error:
         return False
-    return not isinstance(cards, list) or not cards or npu_id in cards
+    return ids is None or npu_id in ids
 
 
 def _device_window(
@@ -216,7 +254,10 @@ def _device_window(
     )
     unscheduled_row_count = len(rows) - scheduled_row_count
     observed_scheduled = len(scheduled_observed) if schedule_available else None
-    if schedule_available and expected:
+    unusable_runs = _unusable_card_runs(runs, start_ns, end_ns)
+    if unusable_runs:
+        coverage = None
+    elif schedule_available and expected:
         coverage = min(1.0, observed_scheduled / expected)
     else:
         coverage = None
@@ -244,6 +285,10 @@ def _device_window(
             field_expected = None
             ratio = None
             basis = "schedule_unavailable"
+        if unusable_runs:
+            ratio = None
+            if basis == "declared_sample_index_phase":
+                basis = "cards_json_unparseable"
         field_coverage[field] = {
             "observed": observed_count,
             "expected": field_expected,
@@ -275,12 +320,8 @@ def _device_window(
     })
     getter_status = _getter_status_counts(rows)
     limitations: list[str] = []
-    unparseable_runs = _unparseable_card_run_ids(runs, start_ns, end_ns)
-    if unparseable_runs:
-        limitations.append(
-            "cards_json_unparseable: run(s) " + ", ".join(unparseable_runs)
-            + " are excluded from this device's scheduled coverage instead of matching every card."
-        )
+    if unusable_runs:
+        limitations.append(_unusable_cards_limitation(unusable_runs, for_device=True))
     if not rows:
         limitations.append("No raw sample was observed for this device in the requested window.")
     else:
@@ -293,7 +334,7 @@ def _device_window(
             limitations.append(
                 "The window contains no declared scheduled sample points for this device."
             )
-        elif coverage < 0.999:
+        elif coverage is not None and coverage < 0.999:
             limitations.append(
                 f"Scheduled coverage is {coverage:.1%} ({observed_scheduled}/{expected} sample points); "
                 f"{missing} declared point(s) are missing."
@@ -404,14 +445,11 @@ def _global_limitations(
     phase_drift_ns_max: int | None,
     timestamp_sources: list[str],
     clock_domains: list[str],
-    unparseable_runs: list[str] | None = None,
+    unusable_runs: list[tuple[str, str]] | None = None,
 ) -> list[str]:
     limitations: list[str] = []
-    if unparseable_runs:
-        limitations.append(
-            "cards_json_unparseable: run(s) " + ", ".join(unparseable_runs)
-            + " are excluded from scheduled coverage instead of matching every card."
-        )
+    if unusable_runs:
+        limitations.append(_unusable_cards_limitation(unusable_runs, for_device=False))
     if schedule_available:
         limitations.append(
             "Coverage uses declared sample_index/phase and interval from ingested run metadata; "
@@ -556,12 +594,14 @@ def build_window(
                     row[finish_column] = int(row["sample_ts_ns"])
     runs = [dict(run) for run in runs or []]
     runs_by_id = {str(run["run_id"]): run for run in runs if run.get("run_id")}
-    unparseable_runs = _unparseable_card_run_ids(runs_by_id, start_ns, end_ns)
-    unparseable_run_set = set(unparseable_runs)
+    unusable_runs = _unusable_card_runs(runs_by_id, start_ns, end_ns)
+    unusable_run_ids = {run_id for run_id, _error in unusable_runs}
+    requested = list(dict.fromkeys(int(device) for device in devices))
     run_ranges = {
         run_id: bounds for run_id, run in runs_by_id.items()
-        if run_id not in unparseable_run_set
+        if run_id not in unusable_run_ids
         and (bounds := run_index_range(run, start_ns, end_ns)) is not None
+        and any(_run_has_card(run, npu_id) for npu_id in requested)
     }
     schedule_available = bool(run_ranges)
     expected_total = sum(max(0, high - low + 1) for low, high in run_ranges.values()) if schedule_available else None
@@ -572,7 +612,6 @@ def build_window(
     observed_total = len(observed_keys) if schedule_available else len({
         int(row.get("scheduled_ts_ns") or row["sample_ts_ns"]) for row in samples
     })
-    requested = list(dict.fromkeys(int(device) for device in devices))
     grouped: dict[int, list[dict[str, Any]]] = {npu_id: [] for npu_id in requested}
     for row in samples:
         npu_id = int(row["npu_id"])
@@ -695,7 +734,9 @@ def build_window(
             "sample_interval_ns": intervals[0] if len(intervals) == 1 else None,
             "interval_source": "run_metadata" if intervals else "unavailable",
             "coverage_basis": (
-                "declared_sample_index_phase" if schedule_available else "schedule_unavailable"
+                "cards_json_unparseable" if unusable_runs
+                else "declared_sample_index_phase" if schedule_available
+                else "schedule_unavailable"
             ),
             "timestamp_sources": timestamp_sources or ["unknown"],
             "clock_domains": clock_domains or ["unknown"],
@@ -740,7 +781,7 @@ def build_window(
         "measurement_limitations": _global_limitations(
             device_payloads, facts, len(samples), int(rollup_sample_count),
             schedule_available, expected_total, observed_total, phase_drift_ns_max,
-            timestamp_sources, clock_domains, unparseable_runs,
+            timestamp_sources, clock_domains, unusable_runs,
         ),
         "devices": device_payloads,
     }

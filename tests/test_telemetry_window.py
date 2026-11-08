@@ -622,10 +622,13 @@ class UnparseableCardsJsonTests(unittest.TestCase):
         self.assertEqual(card0["expected_sample_count"], 2)
         self.assertEqual(card0["observed_scheduled_sample_count"], 2)
         self.assertEqual(card0["unscheduled_row_count"], 2)
-        self.assertEqual(card0["coverage_ratio"], 1.0)
+        self.assertIsNone(card0["coverage_ratio"])
+        self.assertIsNone(card0["field_coverage"]["aicore_percent"]["coverage_ratio"])
         self.assertIsNone(card1["expected_sample_count"])
         self.assertIsNone(card1["coverage_ratio"])
+        self.assertIsNone(payload["coverage_ratio"])
         self.assertEqual(payload["window"]["scheduled_sample_count"], 2)
+        self.assertEqual(payload["window"]["coverage_basis"], "cards_json_unparseable")
         joined = " ".join(
             payload["measurement_limitations"]
             + card0["measurement_limitations"]
@@ -633,8 +636,68 @@ class UnparseableCardsJsonTests(unittest.TestCase):
         )
         self.assertIn("cards_json_unparseable", joined)
         self.assertIn("run-corrupt", joined)
+        self.assertIn("scheduled coverage is null, not full", joined)
+        single = self._window(samples, [good, bad], [0])
+        self.assertEqual(single["devices"][0]["expected_sample_count"], 2)
+        self.assertIsNone(single["devices"][0]["coverage_ratio"])
+        self.assertIsNone(single["coverage_ratio"])
 
-    def test_non_text_cards_json_is_unparseable_not_universal(self) -> None:
+    def test_parsed_illegal_filter_does_not_match_every_card(self) -> None:
+        cases = (
+            ("run-object", "{}"),
+            ("run-null", "null"),
+            ("run-number", "1"),
+            ("run-bool-member", "[true]"),
+            ("run-string-member", '["0"]'),
+        )
+        for run_id, cards_json in cases:
+            with self.subTest(cards_json=cards_json):
+                payload = self._window(
+                    [self._sample(0, run_id, 0), self._sample(1, run_id, 0)],
+                    [self._run(run_id, cards_json, last_index=0)],
+                    [0, 1],
+                )
+                for device in payload["devices"]:
+                    self.assertIsNone(device["expected_sample_count"], cards_json)
+                    self.assertIsNone(device["coverage_ratio"], cards_json)
+                self.assertIsNone(payload["coverage_ratio"], cards_json)
+                joined = " ".join(
+                    payload["measurement_limitations"]
+                    + payload["devices"][0]["measurement_limitations"]
+                )
+                self.assertIn("cards_json_invalid_filter", joined)
+                self.assertIn(run_id, joined)
+                self.assertIn("scheduled coverage is null, not full", joined)
+
+    def test_empty_list_filter_matches_no_card(self) -> None:
+        payload = self._window(
+            [self._sample(0, "run-empty", 0), self._sample(1, "run-empty", 0)],
+            [self._run("run-empty", "[]", last_index=0)],
+            [0, 1],
+        )
+        for device in payload["devices"]:
+            self.assertIsNone(device["expected_sample_count"])
+            self.assertIsNone(device["coverage_ratio"])
+        self.assertIsNone(payload["window"]["scheduled_sample_count"])
+        self.assertNotIn("cards_json_invalid_filter", " ".join(payload["measurement_limitations"]))
+        self.assertNotIn("cards_json_unparseable", " ".join(payload["measurement_limitations"]))
+        decoded = self._window(
+            [self._sample(0, "run-empty", 0), self._sample(1, "run-empty", 0)],
+            [self._run("run-empty", [], last_index=0)],  # type: ignore[arg-type]
+            [0, 1],
+        )
+        for device in decoded["devices"]:
+            self.assertIsNone(device["expected_sample_count"])
+        sibling = self._window(
+            [self._sample(0, "run-card0", 0), self._sample(0, "run-card0", 1)],
+            [self._run("run-card0", "[0]"), self._run("run-empty", "[]")],
+            [0],
+        )
+        self.assertEqual(sibling["devices"][0]["expected_sample_count"], 2)
+        self.assertEqual(sibling["devices"][0]["coverage_ratio"], 1.0)
+        self.assertEqual(sibling["coverage_ratio"], 1.0)
+
+    def test_non_text_cards_json_is_invalid_filter_not_universal(self) -> None:
         payload = self._window(
             [self._sample(0, "run-typed", 0), self._sample(1, "run-typed", 0)],
             [self._run("run-typed", 123, last_index=0)],  # type: ignore[arg-type]
@@ -642,8 +705,9 @@ class UnparseableCardsJsonTests(unittest.TestCase):
         )
         for device in payload["devices"]:
             self.assertIsNone(device["expected_sample_count"])
-            self.assertIn("cards_json_unparseable", " ".join(device["measurement_limitations"]))
+            self.assertIn("cards_json_invalid_filter", " ".join(device["measurement_limitations"]))
             self.assertIn("run-typed", " ".join(device["measurement_limitations"]))
+        self.assertIsNone(payload["coverage_ratio"])
 
     def test_missing_cards_json_still_applies_to_every_requested_card(self) -> None:
         run = self._run("run-all", None, last_index=0)
@@ -655,6 +719,7 @@ class UnparseableCardsJsonTests(unittest.TestCase):
         self.assertEqual(payload["devices"][1]["expected_sample_count"], 1)
         self.assertEqual(payload["coverage_ratio"], 1.0)
         self.assertNotIn("cards_json_unparseable", " ".join(payload["measurement_limitations"]))
+        self.assertNotIn("cards_json_invalid_filter", " ".join(payload["measurement_limitations"]))
 
 
 class PercentileTests(unittest.TestCase):
