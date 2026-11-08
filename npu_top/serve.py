@@ -11,7 +11,7 @@ import signal
 import threading
 import hashlib
 
-from .api import App, AppServer
+from .api import App, AppServer, apply_inventory_exception
 from .db import Database
 from .device_adapter import DeviceAdapter
 from .inventory import LOW_PRIORITY_TAG
@@ -82,12 +82,11 @@ def import_inventory(app, inventory):
                 db.record_failure(server_record["id"], str(auth.get("error") or "SSH 认证不可用"),
                                   operation.summary()["duration_ms"])
             existing[endpoint] = server_record
+        except TimeoutError:
+            raise
         except Exception as exc:
-            result["failure"] = {"stage": stage, "error_type": type(exc).__name__}
-            if stage == "register":
-                result["registration"] = "unknown"
-            elif stage == "bootstrap":
-                result["auth"] = {"ok": False, "state": "unknown", "error_type": type(exc).__name__}
+            result["failure"] = {"stage": stage, "error_type": type(exc).__name__, "error": str(exc)}
+            apply_inventory_exception(result, stage, exc)
         results.append(result)
     failed = sum(not row["auth"].get("ok") or bool(row.get("failure")) for row in results)
     return {"state": "failed" if failed else "completed", "failed_hosts": failed, "results": results}
