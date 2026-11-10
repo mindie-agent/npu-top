@@ -1,18 +1,19 @@
 name: release
 
 on:
-  push:
-    tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
+  actions: read
+  checks: read
+  deployments: read
 
 jobs:
   release:
-    uses: mindie-agent/mindie-bench/.github/workflows/publish-release.yml@484b80621aaf9293c559786d0ef2174c79a0dbb4
+    uses: mindie-agent/mindie-bench/.github/workflows/publish-release.yml@main
     with:
       release-notes-path: docs/releases/npu-top-0.3.1.md
-      benchmark-ref: 484b80621aaf9293c559786d0ef2174c79a0dbb4
       version-files: |
         pyproject.toml
         package.json

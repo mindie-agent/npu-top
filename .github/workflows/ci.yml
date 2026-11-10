@@ -91,3 +91,13 @@ jobs:
           .venv-wheel/bin/python -c "import npu_top, pathlib; p=pathlib.Path(npu_top.__file__).resolve(); assert 'site-packages' in p.parts, p"
           .venv-wheel/bin/npu-top --help
           .venv-wheel/bin/python -c "from npu_top.static_files import require_static; print(require_static() / 'index.html')"
+
+  release-ready:
+    name: release-ready
+    needs: [backend-tests, frontend-build, package]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: python -c 'import json,os; assert all(job["result"] == "success" for job in json.loads(os.environ["RESULTS"]).values()), "required CI failed or was skipped"'
