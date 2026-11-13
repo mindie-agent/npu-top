@@ -21,7 +21,7 @@ jobs:
         package.json
         package-lock.json
       setup-command: |
-        uv venv --python 3.13 && uv pip install -r pyproject.toml pytest
+        uv venv --python 3.13 && uv pip install -e . pytest
       test-command: |
         .venv/bin/python -m pytest -q -m "not live_npu"
       node: true
