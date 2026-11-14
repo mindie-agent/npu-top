@@ -746,10 +746,7 @@ class HostProbe:
             infrastructure = self._infra_cache.get(server_id, {"disks": [], "mounts": [], "docker": {"available": None, "containers": [], "running": None}})
 
         active_pids = sorted({
-            int(process["pid"])
-            for device in devices
-            for process in (device.get("processes") or [])
-            if int(process.get("pid") or 0) > 0
+            int(p["pid"]) for d in devices for p in (d.get("processes") or []) if int(p.get("pid") or 0) > 0
         })
         process_cache = self._process_cache.setdefault(server_id, {})
         stale_pids = active_pids if include_infrastructure else [pid for pid in active_pids if pid not in process_cache]
@@ -761,31 +758,25 @@ class HostProbe:
         self._process_cache[server_id] = {pid: process_cache[pid] for pid in active_pids if pid in process_cache}
         attach_process_details(devices, self._process_cache[server_id], infrastructure["docker"])
 
-        hbm_used = sum(int((device.get("hbm") or {}).get("used_mb") or 0) for device in devices)
-        hbm_total = sum(int((device.get("hbm") or {}).get("total_mb") or 0) for device in devices)
-        utils = [float(device["aicore_percent"]) for device in devices if device.get("aicore_percent") is not None]
+        hbm_used = sum(int((d.get("hbm") or {}).get("used_mb") or 0) for d in devices)
+        hbm_total = sum(int((d.get("hbm") or {}).get("total_mb") or 0) for d in devices)
+        utils = [float(d["aicore_percent"]) for d in devices if d.get("aicore_percent") is not None]
         disks = infrastructure["disks"]
         summary = {
             "cpu_percent": cpu, "load1": _float(load_values, 0), "load5": _float(load_values, 1), "load15": _float(load_values, 2),
-            **memory,
-            "npu_util_percent": round(sum(utils) / len(utils), 1) if utils else None,
+            **memory, "npu_util_percent": round(sum(utils) / len(utils), 1) if utils else None,
             "hbm_used_mb": hbm_used, "hbm_total_mb": hbm_total,
-            "npu_count": len(devices), "busy_npu_count": sum(1 for device in devices if device["busy"]),
+            "npu_count": len(devices), "busy_npu_count": sum(1 for d in devices if d["busy"]),
             "docker_running": infrastructure["docker"].get("running"),
             "disk_max_percent": max((disk["used_percent"] for disk in disks), default=None),
         }
-        duration_ms = round((time.monotonic() - started) * 1000)
         collected_at_ns = time.time_ns()
         return {
-            "server_id": server_id,
-            "collected_at": collected_at_ns / 1_000_000_000,
-            "collected_at_ns": collected_at_ns,
-            "duration_ms": duration_ms,
+            "server_id": server_id, "collected_at": collected_at_ns / 1_000_000_000,
+            "collected_at_ns": collected_at_ns, "duration_ms": round((time.monotonic() - started) * 1000),
             "hostname": sections.get("hostname") or server["name"], "summary": summary,
-            "devices": devices, **infrastructure,
-            "process_details": detail_status,
-            "frequency_probe": frequency_status,
-            "dcmi": dcmi_status,
+            "devices": devices, **infrastructure, "process_details": detail_status,
+            "frequency_probe": frequency_status, "dcmi": dcmi_status,
             **({"transport": _cleanup_facts(result)} if _cleanup_facts(result) else {}),
         }
 

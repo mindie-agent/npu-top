@@ -10,9 +10,11 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import sqlite3
 import threading
 import time
+import urllib.parse
 from functools import wraps
 from pathlib import Path
 from typing import Any
@@ -120,6 +122,30 @@ def bounded_history(method):
     return query
 
 
+_IS_WINDOWS = os.name == "nt"
+
+
+def _win_extended_fs_path(path: Path | str) -> Path | str:
+    if not _IS_WINDOWS:
+        return path
+    raw = os.path.abspath(os.fspath(path))
+    if raw.startswith(("\\\\?\\", "\\\\.\\")):
+        return raw
+    if len(raw) < 248 and len(raw.encode("utf-8")) < 248:
+        return path
+    if raw.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + raw[2:]
+    return "\\\\?\\" + raw
+
+
+def _sqlite_connect_target(path: Path | str) -> tuple[Path | str, bool]:
+    ext = _win_extended_fs_path(path)
+    if not _IS_WINDOWS or not isinstance(ext, str) or not ext.startswith(("\\\\?\\", "\\\\.\\")):
+        return path, False
+    quoted = urllib.parse.quote(ext.replace("\\", "/"), safe="/:")
+    return f"file://{quoted}?vfs=win32-longpath", True
+
+
 class Database:
     def __init__(self, path: Path, max_bytes: int = 1024 * 1024 * 1024) -> None:
         self.path = Path(path)
@@ -131,8 +157,10 @@ class Database:
     def connection(self) -> sqlite3.Connection:
         connection = getattr(self._local, "connection", None)
         if connection is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            connection = sqlite3.connect(self.path, timeout=5.0, check_same_thread=False)
+            parent_target = _win_extended_fs_path(self.path.parent)
+            (Path(parent_target) if isinstance(parent_target, str) else parent_target).mkdir(parents=True, exist_ok=True)
+            target, use_uri = _sqlite_connect_target(self.path)
+            connection = sqlite3.connect(target, timeout=5.0, check_same_thread=False, uri=use_uri)
             try:
                 connection.row_factory = sqlite3.Row
                 connection.execute("PRAGMA journal_mode=WAL")

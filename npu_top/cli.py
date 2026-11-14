@@ -158,8 +158,27 @@ def _format_inventory(result: dict) -> str:
     return "\n".join(rows)
 
 
+def _ensure_utf8_stdio(*streams: object) -> None:
+    for stream in streams:
+        if stream is None:
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        encoding = getattr(stream, "encoding", None)
+        if not callable(reconfigure) or not encoding:
+            continue
+        if str(encoding).lower().replace("_", "-") == "utf-8":
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except TimeoutError:
+            raise
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 @observed("top.cli")
 def main(argv: list[str] | None = None) -> int:
+    _ensure_utf8_stdio(sys.stdout, sys.stderr)
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["diagnostics"]:
         from mindie_diagnostics.cli import main as diagnostics_main

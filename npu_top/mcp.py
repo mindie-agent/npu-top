@@ -12,6 +12,7 @@ import sys
 from typing import Any
 
 from . import __version__
+from .cli import _ensure_utf8_stdio
 from .observability import observed, capture_failure
 from .client import (
     ClientError, VawsTopClient, format_capacity, format_mounts, format_npu, format_server,
@@ -263,6 +264,7 @@ def handle_request(request: dict[str, Any], client: VawsTopClient) -> dict[str, 
 
 @observed("top.mcp")
 def main() -> int:
+    _ensure_utf8_stdio(sys.stdin, sys.stdout, sys.stderr)
     try:
         client = VawsTopClient()
     except ClientError as exc:
