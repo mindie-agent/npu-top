@@ -14,8 +14,9 @@ import os
 import sqlite3
 import threading
 import time
+import urllib.parse
 from functools import wraps
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import Any
 
 from . import dcmi_store
@@ -128,7 +129,9 @@ def _win_extended_fs_path(path: Path | str) -> Path | str:
     if not _IS_WINDOWS:
         return path
     raw = os.path.abspath(os.fspath(path))
-    if len(raw) < 248 or raw.startswith(("\\\\?\\", "\\\\.\\")):
+    if raw.startswith(("\\\\?\\", "\\\\.\\")):
+        return raw
+    if len(raw) < 248 and len(raw.encode("utf-8")) < 248:
         return path
     if raw.startswith("\\\\"):
         return "\\\\?\\UNC\\" + raw[2:]
@@ -136,22 +139,11 @@ def _win_extended_fs_path(path: Path | str) -> Path | str:
 
 
 def _sqlite_connect_target(path: Path | str) -> tuple[Path | str, bool]:
-    if not _IS_WINDOWS:
+    ext = _win_extended_fs_path(path)
+    if not _IS_WINDOWS or not isinstance(ext, str) or not ext.startswith(("\\\\?\\", "\\\\.\\")):
         return path, False
-    raw = os.path.abspath(os.fspath(path))
-    clean = raw
-    had_ext = False
-    if raw.upper().startswith("\\\\?\\UNC\\"):
-        clean = "\\\\" + raw[8:]
-        had_ext = True
-    elif raw.startswith("\\\\?\\") and len(raw) >= 7 and raw[4].isalpha() and raw[5:7] == ":\\":
-        clean = raw[4:]
-        had_ext = True
-    elif raw.startswith(("\\\\?\\", "\\\\.\\")):
-        return raw, False
-    if len(clean.encode("utf-8")) < 248 and not had_ext:
-        return path, False
-    return PureWindowsPath(clean).as_uri() + "?vfs=win32-longpath", True
+    quoted = urllib.parse.quote(ext.replace("\\", "/"), safe="/:")
+    return f"file://{quoted}?vfs=win32-longpath", True
 
 
 class Database:

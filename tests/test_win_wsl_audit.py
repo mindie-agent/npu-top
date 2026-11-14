@@ -151,9 +151,9 @@ def test_database_long_path_and_win_extended_helper(tmp_path: Path, monkeypatch:
     assert len(near_1032.encode("utf-8")) == 1033
     uri_target, use_uri = db._sqlite_connect_target(near_1032)
     assert use_uri is True
-    assert str(uri_target).startswith("file:///C:/") and str(uri_target).endswith("?vfs=win32-longpath")
+    assert str(uri_target).startswith("file:////%3F/C:/") and str(uri_target).endswith("?vfs=win32-longpath")
     unc_uri, unc_flag = db._sqlite_connect_target(long_unc)
-    assert unc_flag is True and "?vfs=win32-longpath" in str(unc_uri)
+    assert unc_flag is True and str(unc_uri).startswith("file:////%3F/UNC/server/share/") and "?vfs=win32-longpath" in str(unc_uri)
 
     monkeypatch.setattr(db, "_IS_WINDOWS", os.name == "nt")
     existing_dir = tmp_path / "stat_timeout_dir"
