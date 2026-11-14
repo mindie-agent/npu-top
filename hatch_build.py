@@ -1,7 +1,7 @@
 """Hatch wheel build hook that packages prebuilt frontend assets.
 
 [Role] Builds `npu_top/static` with native `npm` only when a wheel target lacks `index.html`, then registers the asset tree as an artifact.
-[Invariants] Source and sdist targets never run npm; wheel builds prefer `npm.cmd` with `CREATE_NO_WINDOW` on Windows, reject WSL2 DrvFS / Windows PE `npm` shadows on POSIX, and propagate `TimeoutError` across every `OSError` boundary.
+[Invariants] Editable, source, and sdist targets never run npm; standard wheel builds prefer `npm.cmd` with `CREATE_NO_WINDOW` on Windows, reject WSL2 DrvFS / Windows PE `npm` shadows on POSIX, return absolute executable paths, and propagate `TimeoutError` across every `OSError` boundary.
 [Timeouts & Locks] `npm ci` is bounded at `300s` and `npm run build` at `120s` with `stdin=DEVNULL`; zero locks.
 [Side-Effect Policy] Installs Node dependencies and writes generated frontend assets under `npu_top/static` when assets are absent.
 """
@@ -121,7 +121,7 @@ def resolve_npm(*, path: str | None = None) -> str | None:
     for entry in search_path.split(os.pathsep):
         if not entry:
             continue
-        cand = Path(entry) / "npm"
+        cand = Path(os.path.abspath(entry)) / "npm"
         if cand.suffix.lower() in _WIN_SCRIPT_EXTS:
             continue
         if not _is_exec_regular_file(cand):
@@ -134,7 +134,7 @@ def resolve_npm(*, path: str | None = None) -> str | None:
 
 class CustomBuildHook(BuildHookInterface):
     def initialize(self, version: str, build_data: dict) -> None:
-        if self.target_name != "wheel":
+        if self.target_name != "wheel" or version == "editable":
             return
         root = Path(self.root)
         static = root / "npu_top" / "static"

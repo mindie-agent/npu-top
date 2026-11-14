@@ -15,7 +15,7 @@ import sqlite3
 import threading
 import time
 from functools import wraps
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from . import dcmi_store
@@ -135,6 +135,25 @@ def _win_extended_fs_path(path: Path | str) -> Path | str:
     return "\\\\?\\" + raw
 
 
+def _sqlite_connect_target(path: Path | str) -> tuple[Path | str, bool]:
+    if not _IS_WINDOWS:
+        return path, False
+    raw = os.path.abspath(os.fspath(path))
+    clean = raw
+    had_ext = False
+    if raw.upper().startswith("\\\\?\\UNC\\"):
+        clean = "\\\\" + raw[8:]
+        had_ext = True
+    elif raw.startswith("\\\\?\\") and len(raw) >= 7 and raw[4].isalpha() and raw[5:7] == ":\\":
+        clean = raw[4:]
+        had_ext = True
+    elif raw.startswith(("\\\\?\\", "\\\\.\\")):
+        return raw, False
+    if len(clean.encode("utf-8")) < 248 and not had_ext:
+        return path, False
+    return PureWindowsPath(clean).as_uri() + "?vfs=win32-longpath", True
+
+
 class Database:
     def __init__(self, path: Path, max_bytes: int = 1024 * 1024 * 1024) -> None:
         self.path = Path(path)
@@ -146,8 +165,10 @@ class Database:
     def connection(self) -> sqlite3.Connection:
         connection = getattr(self._local, "connection", None)
         if connection is None:
-            os.makedirs(_win_extended_fs_path(self.path.parent), exist_ok=True)
-            connection = sqlite3.connect(_win_extended_fs_path(self.path), timeout=5.0, check_same_thread=False)
+            parent_target = _win_extended_fs_path(self.path.parent)
+            (Path(parent_target) if isinstance(parent_target, str) else parent_target).mkdir(parents=True, exist_ok=True)
+            target, use_uri = _sqlite_connect_target(self.path)
+            connection = sqlite3.connect(target, timeout=5.0, check_same_thread=False, uri=use_uri)
             try:
                 connection.row_factory = sqlite3.Row
                 connection.execute("PRAGMA journal_mode=WAL")

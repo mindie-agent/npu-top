@@ -40,8 +40,12 @@ def test_hatch_build_windows_prefers_npm_cmd_with_create_no_window(tmp_path: Pat
     hook = object.__new__(hatch_build.CustomBuildHook)
     monkeypatch.setattr(hatch_build.CustomBuildHook, "target_name", property(lambda self: "wheel"), raising=False)
     monkeypatch.setattr(hatch_build.CustomBuildHook, "root", property(lambda self: str(tmp_path)), raising=False)
+    editable_data: dict[str, list[str]] = {"artifacts": []}
+    hook.initialize("editable", editable_data)
+    assert calls == []
+
     build_data: dict[str, list[str]] = {"artifacts": []}
-    hook.initialize("0.3.4", build_data)
+    hook.initialize("standard", build_data)
 
     assert len(calls) == 2
     assert calls[0][0][0] == r"C:\Program Files\nodejs\npm.cmd"
@@ -98,6 +102,9 @@ def test_hatch_build_posix_skips_drvfs_pe_and_handles_path_edges(tmp_path: Path,
     monkeypatch.setattr(hatch_build.os, "defpath", str(lin_dir))
     monkeypatch.setenv("PATH", "")
     assert hatch_build.resolve_npm() is None
+    monkeypatch.setenv("PATH", f"{drv_dir}:.:{lin_dir}")
+    dot_resolved = hatch_build.resolve_npm()
+    assert dot_resolved == str(cwd_npm.resolve()) and os.path.isabs(dot_resolved)
     monkeypatch.delenv("PATH", raising=False)
     assert hatch_build.resolve_npm() == str(lin_npm)
 
@@ -139,3 +146,28 @@ def test_database_long_path_and_win_extended_helper(tmp_path: Path, monkeypatch:
     assert str(db._win_extended_fs_path(long_nt)).startswith("\\\\?\\C:\\")
     long_unc = "\\\\server\\share\\" + "\\".join(["b" * 50] * 6) + "\\monitor.sqlite3"
     assert str(db._win_extended_fs_path(long_unc)).startswith("\\\\?\\UNC\\server\\share\\")
+
+    near_1032 = "C:\\" + ("d" * 1014) + "\\monitor.sqlite3"
+    assert len(near_1032.encode("utf-8")) == 1033
+    uri_target, use_uri = db._sqlite_connect_target(near_1032)
+    assert use_uri is True
+    assert str(uri_target).startswith("file:///C:/") and str(uri_target).endswith("?vfs=win32-longpath")
+    unc_uri, unc_flag = db._sqlite_connect_target(long_unc)
+    assert unc_flag is True and "?vfs=win32-longpath" in str(unc_uri)
+
+    monkeypatch.setattr(db, "_IS_WINDOWS", os.name == "nt")
+    existing_dir = tmp_path / "stat_timeout_dir"
+    existing_dir.mkdir()
+    real_stat = Path.stat
+
+    def timeout_on_existing_dir(self: Path, *args: object, **kwargs: object) -> object:
+        if self == existing_dir:
+            raise TimeoutError("directory stat deadline")
+        return real_stat(self, *args, **kwargs)
+
+    with (
+        mock.patch("os.mkdir", side_effect=FileExistsError(17, "exists")),
+        mock.patch.object(Path, "stat", timeout_on_existing_dir),
+    ):
+        with pytest.raises(TimeoutError, match="directory stat deadline"):
+            db.Database(existing_dir / "monitor.sqlite3").connection()
