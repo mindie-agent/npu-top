@@ -42,6 +42,7 @@ jobs:
         working-directory: ${{ runner.temp }}
         env:
           HOME: ${{ runner.temp }}/empty-home
+          USERPROFILE: ${{ runner.temp }}/empty-home
         run: |
           mkdir -p "$HOME"
           python3 -m pytest -q "${{ github.workspace }}/tests" -m "not live_npu"

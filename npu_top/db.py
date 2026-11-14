@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import sqlite3
 import threading
 import time
@@ -120,6 +121,20 @@ def bounded_history(method):
     return query
 
 
+_IS_WINDOWS = os.name == "nt"
+
+
+def _win_extended_fs_path(path: Path | str) -> Path | str:
+    if not _IS_WINDOWS:
+        return path
+    raw = os.path.abspath(os.fspath(path))
+    if len(raw) < 248 or raw.startswith(("\\\\?\\", "\\\\.\\")):
+        return path
+    if raw.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + raw[2:]
+    return "\\\\?\\" + raw
+
+
 class Database:
     def __init__(self, path: Path, max_bytes: int = 1024 * 1024 * 1024) -> None:
         self.path = Path(path)
@@ -131,8 +146,8 @@ class Database:
     def connection(self) -> sqlite3.Connection:
         connection = getattr(self._local, "connection", None)
         if connection is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            connection = sqlite3.connect(self.path, timeout=5.0, check_same_thread=False)
+            os.makedirs(_win_extended_fs_path(self.path.parent), exist_ok=True)
+            connection = sqlite3.connect(_win_extended_fs_path(self.path), timeout=5.0, check_same_thread=False)
             try:
                 connection.row_factory = sqlite3.Row
                 connection.execute("PRAGMA journal_mode=WAL")
