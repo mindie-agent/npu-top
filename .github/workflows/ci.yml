@@ -12,14 +12,15 @@ jobs:
   backend-tests:
     name: backend tests (${{ matrix.os }}, python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     defaults:
       run:
         shell: bash
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.11", "3.12"]
-        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13"]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -50,6 +51,7 @@ jobs:
   frontend-build:
     name: frontend lint and build
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -64,6 +66,7 @@ jobs:
   package:
     name: wheel with frontend assets
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -81,23 +84,26 @@ jobs:
         run: |
           unzip -l dist/*.whl
           unzip -l dist/*.whl | grep -F 'npu_top/static/index.html'
-      - name: Install the wheel and smoke the console script
+      - name: Install the wheel and smoke the console script outside checkout
         env:
           HOME: ${{ runner.temp }}/empty-home
+          MINDIE_DATA_HOME: ${{ runner.temp }}/empty-home/mindie-data
         run: |
-          mkdir -p "$HOME"
-          cd "${{ runner.temp }}"
-          uv venv .venv-wheel
-          VIRTUAL_ENV="$PWD/.venv-wheel" uv pip install "${{ github.workspace }}"/dist/*.whl
-          .venv-wheel/bin/python -c "import npu_top, pathlib; p=pathlib.Path(npu_top.__file__).resolve(); assert 'site-packages' in p.parts, p"
-          .venv-wheel/bin/npu-top --help
-          .venv-wheel/bin/python -c "from npu_top.static_files import require_static; print(require_static() / 'index.html')"
+          mkdir -p "$HOME" "${{ runner.temp }}/smoke-cwd"
+          cd "${{ runner.temp }}/smoke-cwd"
+          uv venv "${{ runner.temp }}/.venv-wheel"
+          VIRTUAL_ENV="${{ runner.temp }}/.venv-wheel" uv pip install "${{ github.workspace }}"/dist/*.whl
+          "${{ runner.temp }}/.venv-wheel/bin/python" -c "import npu_top, pathlib; from npu_top.settings import Settings; p=pathlib.Path(npu_top.__file__).resolve(); assert 'site-packages' in p.parts, p; s=Settings.load(); assert s.state_dir.name == 'npu-top'"
+          "${{ runner.temp }}/.venv-wheel/bin/npu-top" --help
+          "${{ runner.temp }}/.venv-wheel/bin/python" -c "from npu_top.static_files import require_static; print(require_static() / 'index.html')"
+          test ! -e "${{ runner.temp }}/smoke-cwd/data"
 
   release-ready:
     name: release-ready
     needs: [backend-tests, frontend-build, package]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - env:
           RESULTS: ${{ toJSON(needs) }}

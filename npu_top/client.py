@@ -22,7 +22,7 @@ class ClientError(RuntimeError):
     pass
 
 
-class VawsTopClient:
+class NpuTopClient:
     def __init__(self, base_url: str | None = None, timeout: float = 3.0) -> None:
         self.base_url = (base_url or os.environ.get("MINDIE_TOP_URL") or DEFAULT_URL).rstrip("/")
         self.timeout = timeout
@@ -102,6 +102,10 @@ class VawsTopClient:
         })
 
 
+# Retained import alias for host-plugin compatibility (mindie-agent-oc / mindie-agent-wb).
+VawsTopClient = NpuTopClient
+
+
 def _number(value: Any, suffix: str = "%") -> str:
     return "-" if value is None else f"{float(value):g}{suffix}"
 
@@ -124,8 +128,9 @@ def format_npu(payload: dict[str, Any], ultra_compact: bool = False) -> str:
         headline += f" error={payload['error']}"
     if payload.get("recording", {}).get("state") == "failed":
         headline += " history_recording=failed"
-    if payload.get("process_details", {}).get("state") == "unavailable":
-        headline += " process_details=unavailable"
+    detail_state = payload.get("process_details", {}).get("state")
+    if detail_state in ("unavailable", "skipped"):
+        headline += f" process_details={detail_state}"
     if ultra_compact or not payload.get("devices"):
         return headline
     lines = [headline]

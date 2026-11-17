@@ -214,6 +214,11 @@ class App:
         if end_ns - start_ns > 90 * 86400 * 1_000_000_000:
             raise AgentQueryError("telemetry window must not exceed 90 days")
         server, _snapshot = find_server(host, self.db.list_servers(), self.scheduler.snapshots())
+        if hasattr(self.db, "telemetry_window"):
+            return self.db.telemetry_window(
+                server, devices, start_ns / 1_000_000_000, end_ns / 1_000_000_000,
+                start_ts_ns=start_ns, end_ts_ns=end_ns,
+            )
         window_data = self.db.telemetry_samples(
             server["id"], devices, start_ns / 1_000_000_000, end_ns / 1_000_000_000,
             start_ts_ns=start_ns, end_ts_ns=end_ns,
