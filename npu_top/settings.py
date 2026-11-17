@@ -86,7 +86,11 @@ def default_state_dir(*, cwd: Path | None = None) -> Path:
         local_app = (os.environ.get("LOCALAPPDATA") or "").strip()
         if local_app:
             return (Path(local_app).expanduser() / "mindie-agent" / "npu-top").resolve()
-    return (Path.home() / ".local" / "share" / "mindie-agent" / "npu-top").resolve()
+    try:
+        base_home = Path.home()
+    except RuntimeError:
+        base_home = active_cwd
+    return (base_home / ".local" / "share" / "mindie-agent" / "npu-top").resolve()
 
 
 @dataclass(frozen=True)

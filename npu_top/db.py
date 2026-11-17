@@ -671,7 +671,7 @@ class Database:
             "start_ts_ns": start_ns, "end_ts_ns": end_ns,
         }
 
-    @bounded_history(timeout_seconds=15.0)
+    @bounded_history(timeout_seconds=30.0)
     def telemetry_window(
         self, server: dict[str, Any], devices: list[int], start_ts: float, end_ts: float,
         *, start_ts_ns: int | None = None, end_ts_ns: int | None = None,

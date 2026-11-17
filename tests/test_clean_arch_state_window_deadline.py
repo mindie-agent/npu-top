@@ -61,6 +61,8 @@ def test_settings_default_uses_owned_data_dir_and_never_pollutes_unrelated_cwd_d
 
     monkeypatch.chdir(fake_cwd)
     monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
     monkeypatch.delenv("MINDIE_TOP_STATE_DIR", raising=False)
     monkeypatch.delenv("NFM_STATE_DIR", raising=False)
     monkeypatch.delenv("MINDIE_DATA_HOME", raising=False)
@@ -411,6 +413,7 @@ def test_shared_monotonic_probe_deadline_skips_exhausted_optional_passes_and_pre
         latest_persisted=lambda: {}, close=lambda: None,
         list_servers=lambda: [{"id": "s3", "name": "s3", "host": "127.0.0.1", "enabled": True}],
         record_success=lambda *_: None,
+        prune=lambda *_: None,
     )
     sched = AdaptiveScheduler(settings, db_stub, probe3)
     sched.start()
