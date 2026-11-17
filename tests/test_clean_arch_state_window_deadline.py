@@ -409,15 +409,20 @@ def test_shared_monotonic_probe_deadline_skips_exhausted_optional_passes_and_pre
         idle_interval=120, history_interval=30, infrastructure_interval=60,
         retention_days=90, max_workers=1,
     )
+    live_servers: list[dict[str, object]] = []
     db_stub = SimpleNamespace(
         latest_persisted=lambda: {}, close=lambda: None,
-        list_servers=lambda: [{"id": "s3", "name": "s3", "host": "127.0.0.1", "enabled": True}],
+        list_servers=lambda: list(live_servers),
         record_success=lambda *_: None,
         prune=lambda *_: None,
     )
     sched = AdaptiveScheduler(settings, db_stub, probe3)
     sched.start()
     try:
+        wait_init = time.monotonic() + 2.0
+        while sched.runtime_state()["last_cycle_at"] is None and time.monotonic() < wait_init:
+            time.sleep(0.01)
+        live_servers.append({"id": "s3", "name": "s3", "host": "127.0.0.1", "enabled": True})
         with pytest.raises(TimeoutError, match="live collection timed out"):
             sched.collect_and_wait("s3", force_infrastructure=True, timeout=5)
         assert "s3" not in sched._last_infra
