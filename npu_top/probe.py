@@ -1,15 +1,21 @@
-"""SSH host probe and parser for NPU, CPU, memory, disk, mount, Docker, and `/proc` telemetry.
+"""SSH host probe orchestrator for NPU, CPU, memory, disk, mount, Docker, and `/proc` telemetry.
 
-[Role] Executes bounded remote shell probes over SSH and parses raw sections into structured host snapshots.
-[Invariants] Observation-only; `npu_info_rc` gates NPU health while optional `usages`/Docker/process-detail failures degrade gracefully without hiding NPU errors.
-[Timeouts & Locks] Remote `npu-smi` commands use inner `timeout 8` and Docker commands use `timeout 5`/`timeout 10`; outer SSH timeout is `max(ssh_timeout + 25, 45)` when infrastructure is included (`>= sum(inner_budgets) + grace`). The optional `-t common` frequency pass has an 8 s inner budget, per-card `timeout 2`, a 3 s cleanup grace, and outer `budget + 2 + 3` (never a `min` that truncates the inner budget); a killed pass keeps any complete card sections already printed. The optional DCMI pass is a bounded `python3 -` helper: inner `timeout 5 --kill-after=1`, 3 s cleanup grace, outer `5 + 1 + 3 = 9` s, skipped with `ConfiguredTimeoutTooSmall` when the configured SSH timeout cannot cover that sum.
-[Side-Effect Policy] Read-only remote SSH probes (`/proc`, `df`, `findmnt`, `docker ps/stats/info`, `npu-smi info`, `npu-smi info -t common`, DCMI `dcmi_init` + `dcmi_get_device_info`); never mutates remote host state or submits NPU work.
+[Role] Executes bounded remote shell/Python probes over SSH under a single shared
+monotonic collection deadline and merges parsed sections into structured host snapshots.
+[Invariants] Observation-only; `npu_info_rc` gates NPU health while optional `usages`,
+frequency (`-t common`), DCMI, Docker, and `/proc` passes degrade gracefully (`skipped` or
+`unavailable`) without erasing base NPU observations.
+[Timeouts & Locks] Enforces one shared monotonic collection deadline across base+infra,
+frequency, DCMI, and process-detail passes (`outer_timeout >= sum(inner_budgets) + grace`).
+Optional passes whose minimum outer budget exceeds remaining collection time are skipped
+with `reason="collection_deadline_exhausted"`.
+[Side-Effect Policy] Read-only remote SSH probes (`/proc`, `df`, `findmnt`, `docker`,
+`npu-smi`, DCMI); never mutates remote host state or submits NPU work.
 """
 from __future__ import annotations
 
-import base64
 import json
-import re
+import math
 import subprocess
 import time
 from pathlib import Path
@@ -20,17 +26,27 @@ from remote_dev.core.ssh_transport import RemoteCompleted
 from . import dcmi_telemetry
 from .device_adapter import DeviceAdapter
 from .npu_smi import parse_npu_common
+from .probe_parsers import (
+    EMPLOYEE_ID_PATTERN, INITIALS_PATTERN, INITIALS_STOP_WORDS, SECTION,
+    attach_process_details, cpu_percent, extract_container_id, extract_ownership_labels,
+    is_device_busy, parse_cpu_stat, parse_disks, parse_docker, parse_meminfo,
+    parse_mounts, parse_process_details, split_sections,
+)
 from .ssh_access import capture_ssh
 
+__all__ = [
+    "DCMI_CLEANUP_GRACE_SECONDS", "DCMI_INNER_SECONDS", "DCMI_KILL_AFTER_SECONDS",
+    "DCMI_OUTER_TIMEOUT_SECONDS", "DCMI_TIMEOUT_SECONDS", "EMPLOYEE_ID_PATTERN",
+    "FAST_SCRIPT", "FREQUENCY_BUDGET_SECONDS", "FREQUENCY_CARD_TIMEOUT_SECONDS",
+    "FREQUENCY_CLEANUP_GRACE_SECONDS", "FREQUENCY_OUTER_TIMEOUT_SECONDS", "FREQUENCY_SCRIPT",
+    "HostProbe", "INFRA_SCRIPT", "INITIALS_PATTERN", "INITIALS_STOP_WORDS",
+    "PROCESS_DETAIL_SCRIPT", "SECTION", "attach_process_details", "build_frequency_script",
+    "build_process_detail_script", "cpu_percent", "dcmi_probe_plan",
+    "extract_container_id", "extract_ownership_labels", "frequency_probe_plan",
+    "is_device_busy", "parse_cpu_stat", "parse_disks", "parse_docker",
+    "parse_meminfo", "parse_mounts", "parse_process_details", "split_sections",
+]
 
-SECTION = "__NFM_SECTION__"
-EMPLOYEE_ID_PATTERN = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{1,3}\d{7,9})(?![A-Za-z0-9])")
-INITIALS_PATTERN = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]{2,4})(?![A-Za-z0-9])")
-INITIALS_STOP_WORDS = {
-    "app", "bin", "data", "dev", "etc", "home", "lib", "log", "logs", "mnt",
-    "opt", "proc", "root", "run", "src", "sys", "test", "tmp", "usr", "var",
-    "vllm", "work",
-}
 FAST_SCRIPT = r'''set +e
 if [ -f /etc/profile.d/mindie-ascend-env.sh ]; then . /etc/profile.d/mindie-ascend-env.sh >/dev/null 2>&1; fi
 export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64:${LD_LIBRARY_PATH:-}
@@ -101,159 +117,6 @@ done
 '''
 
 
-def split_sections(output: str) -> dict[str, str]:
-    sections: dict[str, list[str]] = {}
-    current: str | None = None
-    for line in output.splitlines():
-        if line.startswith(SECTION):
-            current = line[len(SECTION):].strip()
-            sections.setdefault(current, [])
-        elif current is not None:
-            sections[current].append(line)
-    return {key: "\n".join(lines).strip() for key, lines in sections.items()}
-
-
-def parse_meminfo(text: str) -> dict[str, int | None]:
-    values: dict[str, int] = {}
-    for line in text.splitlines():
-        match = re.match(r"([^:]+):\s+(\d+)", line)
-        if match:
-            values[match.group(1)] = int(match.group(2)) * 1024
-    total = values.get("MemTotal")
-    available = values.get("MemAvailable")
-    swap_total = values.get("SwapTotal")
-    swap_free = values.get("SwapFree")
-    return {
-        "memory_total_bytes": total,
-        "memory_used_bytes": total - available if total is not None and available is not None else None,
-        "swap_total_bytes": swap_total,
-        "swap_used_bytes": swap_total - swap_free if swap_total is not None and swap_free is not None else None,
-    }
-
-
-def parse_cpu_stat(text: str) -> tuple[int, int] | None:
-    tokens = text.split()
-    if not tokens or tokens[0] != "cpu":
-        return None
-    try:
-        values = [int(value) for value in tokens[1:]]
-    except ValueError:
-        return None
-    if len(values) < 4:
-        return None
-    idle = values[3] + (values[4] if len(values) > 4 else 0)
-    return sum(values), idle
-
-
-def cpu_percent(previous: tuple[int, int] | None, current: tuple[int, int] | None) -> float | None:
-    if not previous or not current:
-        return None
-    total = current[0] - previous[0]
-    idle = current[1] - previous[1]
-    if total <= 0:
-        return None
-    return round(max(0.0, min(100.0, (total - idle) * 100.0 / total)), 1)
-
-
-def _is_excluded_storage(source: str | None, target: str | None, fstype: str | None = None) -> bool:
-    mount = str(target or "").rstrip("/")
-    excluded_mounts = ("/boot", "/efi", "/var/lib/docker/overlay", "/var/lib/docker/overlay2")
-    return (
-        str(source or "").casefold() == "overlay"
-        or str(fstype or "").casefold() == "overlay"
-        or any(mount == base or mount.startswith(base + "/") for base in excluded_mounts)
-    )
-
-
-def parse_disks(text: str) -> list[dict[str, Any]]:
-    disks: list[dict[str, Any]] = []
-    for line in text.splitlines()[1:]:
-        cells = line.split()
-        if len(cells) < 6:
-            continue
-        try:
-            total, used, available = int(cells[1]), int(cells[2]), int(cells[3])
-            percent = float(cells[4].rstrip("%"))
-        except ValueError:
-            continue
-        mount = " ".join(cells[5:])
-        if _is_excluded_storage(cells[0], mount):
-            continue
-        disks.append({
-            "filesystem": cells[0], "total_bytes": total, "used_bytes": used,
-            "available_bytes": available, "used_percent": percent, "mount": mount,
-        })
-    return disks
-
-
-def parse_mounts(text: str) -> list[dict[str, Any]]:
-    try:
-        payload = json.loads(text)
-        mounts = []
-
-        def append_filesystems(filesystems: list[dict[str, Any]]) -> None:
-            for item in filesystems:
-                if not _is_excluded_storage(item.get("source"), item.get("target"), item.get("fstype")):
-                    mounts.append({
-                        "target": item.get("target"), "source": item.get("source"),
-                        "fstype": item.get("fstype"), "options": item.get("options"),
-                    })
-                append_filesystems(item.get("children") or [])
-
-        append_filesystems(payload.get("filesystems", []))
-        return mounts
-    except (json.JSONDecodeError, AttributeError):
-        mounts = []
-        for line in text.splitlines():
-            cells = line.split()
-            if len(cells) >= 4 and not _is_excluded_storage(cells[0], cells[1], cells[2]):
-                mounts.append({"source": cells[0], "target": cells[1], "fstype": cells[2], "options": cells[3]})
-        return mounts
-
-
-def parse_docker(text: str, stats_text: str = "", info_text: str = "") -> dict[str, Any]:
-    if text.strip() == "unavailable":
-        return {"available": False, "containers": [], "running": 0}
-    containers = []
-    error = None
-    for line in text.splitlines():
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            error = line[-500:]
-            continue
-        containers.append({
-            "id": item.get("ID"), "name": item.get("Names"), "image": item.get("Image"),
-            "status": item.get("Status"), "state": item.get("State"), "ports": item.get("Ports"),
-        })
-    stats: dict[str, dict[str, Any]] = {}
-    for line in stats_text.splitlines():
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        key = str(item.get("Name") or item.get("Container") or "")
-        if key:
-            stats[key] = {
-                "cpu_percent": item.get("CPUPerc"), "memory": item.get("MemUsage"),
-                "memory_percent": item.get("MemPerc"), "network_io": item.get("NetIO"),
-                "block_io": item.get("BlockIO"), "pids": item.get("PIDs"),
-            }
-    for container in containers:
-        container["stats"] = stats.get(str(container.get("name"))) or stats.get(str(container.get("id")))
-    info: dict[str, Any] = {}
-    try:
-        raw_info = json.loads(info_text)
-        info = {
-            "server_version": raw_info.get("ServerVersion"), "driver": raw_info.get("Driver"),
-            "docker_root_dir": raw_info.get("DockerRootDir"), "containers": raw_info.get("Containers"),
-            "containers_running": raw_info.get("ContainersRunning"), "containers_stopped": raw_info.get("ContainersStopped"),
-        }
-    except (json.JSONDecodeError, AttributeError):
-        pass
-    return {"available": error is None, "containers": containers, "running": len(containers), "info": info, "error": error}
-
-
 def build_process_detail_script(pids: list[int]) -> str:
     safe_pids = " ".join(str(pid) for pid in sorted(set(pids)) if pid > 0)
     return PROCESS_DETAIL_SCRIPT.replace("__NFM_PIDS__", safe_pids) + "\nexit 0\n"
@@ -262,12 +125,7 @@ def build_process_detail_script(pids: list[int]) -> str:
 def build_frequency_script(
     npu_ids: list[int], budget_seconds: int = FREQUENCY_BUDGET_SECONDS,
 ) -> str:
-    """Build a bounded `-t common` query for validated integer card ids.
-
-    The script keeps each card's exit code in a `common_rc_<card>` section and
-    exits nonzero if any card failed, so a read-only sampling failure cannot be
-    hidden by a trailing `exit 0`.
-    """
+    """Build a bounded `-t common` query for validated integer card ids."""
     cards = sorted({int(npu_id) for npu_id in npu_ids
                     if not isinstance(npu_id, bool) and isinstance(npu_id, int) and npu_id >= 0})
     if not cards:
@@ -282,11 +140,7 @@ def build_frequency_script(
 
 
 def frequency_probe_plan(configured_timeout: int) -> tuple[int, int] | None:
-    """Return `(inner_budget, outer_timeout)` with outer >= budget + card + grace.
-
-    The optional pass is skipped when the configured SSH timeout cannot cover
-    one card plus cleanup; the outer timeout never truncates the inner budget.
-    """
+    """Return `(inner_budget, outer_timeout)` with `outer >= budget + card + grace`."""
     available = int(configured_timeout) - FREQUENCY_CARD_TIMEOUT_SECONDS - FREQUENCY_CLEANUP_GRACE_SECONDS
     if available < 1:
         return None
@@ -295,148 +149,22 @@ def frequency_probe_plan(configured_timeout: int) -> tuple[int, int] | None:
 
 
 def dcmi_probe_plan(configured_timeout: int) -> tuple[int, int] | None:
-    """Return `(inner_seconds, outer_timeout)` with outer = inner + kill_after + grace.
-
-    The optional pass is skipped when the configured SSH timeout cannot cover
-    the remote python helper, SIGKILL follow-up, and cleanup grace. The outer
-    timeout never truncates the inner budget.
-    """
+    """Return `(inner_seconds, outer_timeout)` with `outer = inner + kill_after + grace`."""
     if int(configured_timeout) < DCMI_OUTER_TIMEOUT_SECONDS:
         return None
     return DCMI_INNER_SECONDS, DCMI_OUTER_TIMEOUT_SECONDS
 
 
-def _decode_process_field(value: str) -> str | None:
-    if not value:
-        return None
-    try:
-        decoded = base64.b64decode(value).decode("utf-8", errors="replace").strip()
-    except (ValueError, TypeError):
-        return None
-    return decoded or None
-
-
-def extract_container_id(cgroup: str | None) -> str | None:
-    if not cgroup:
-        return None
-    match = re.search(r"\b([0-9a-f]{64})\b", cgroup, re.IGNORECASE)
-    return match.group(1).lower() if match else None
-
-
-def extract_ownership_labels(cwd: str | None, container_name: str | None) -> list[dict[str, Any]]:
-    sources = (("pwd", cwd), ("container", container_name))
-    labels: dict[tuple[str, str], dict[str, Any]] = {}
-    for kind, pattern in (("employee_id", EMPLOYEE_ID_PATTERN), ("initials", INITIALS_PATTERN)):
-        for source, text in sources:
-            if not text:
-                continue
-            for match in pattern.finditer(text):
-                value = match.group(1)
-                normalized = value.casefold()
-                if kind == "initials" and normalized in INITIALS_STOP_WORDS:
-                    continue
-                key = (kind, normalized)
-                label = labels.setdefault(key, {"value": value, "kind": kind, "sources": []})
-                if source not in label["sources"]:
-                    label["sources"].append(source)
-    return list(labels.values())
-
-
-_DISK_WAIT_WCHAN_TOKENS = ("lock_page", "folio_wait", "nfs_", "ceph_", "blk_mq", "io_schedule", "wait_on_page")
-
-
-def _is_disk_io_wait(proc_state: str | None, wchan: str | None) -> bool:
-    st = str(proc_state or "").strip().upper()
-    wc = str(wchan or "").strip().lower()
-    return st == "D" or any(tok in wc for tok in _DISK_WAIT_WCHAN_TOKENS)
-
-
-def parse_process_details(text: str) -> dict[int, dict[str, Any]]:
-    details: dict[int, dict[str, Any]] = {}
-    for line in text.splitlines():
-        cells = line.split("\t")
-        if len(cells) not in (7, 9) or not cells[0].isdigit():
-            continue
-        user, cwd, command, executable, name, cgroup = (_decode_process_field(value) for value in cells[1:7])
-        proc_state = _decode_process_field(cells[7]) if len(cells) >= 9 else None
-        wchan = _decode_process_field(cells[8]) if len(cells) >= 9 else None
-        pid = int(cells[0])
-        details[pid] = {
-            "pid": pid,
-            "name": name,
-            "user": user,
-            "cwd": cwd,
-            "command": command,
-            "executable": executable,
-            "container_id": extract_container_id(cgroup),
-            "proc_state": proc_state,
-            "wchan": wchan,
-            "disk_io_wait": _is_disk_io_wait(proc_state, wchan),
-        }
-    return details
-
-
-def attach_process_details(
-    devices: list[dict[str, Any]],
-    details: dict[int, dict[str, Any]],
-    docker: dict[str, Any],
-) -> None:
-    containers = docker.get("containers") or []
-    by_id = {
-        str(container.get("id") or "").lower(): container
-        for container in containers
-        if container.get("id")
-    }
-    for device in devices:
-        enriched = []
-        for record in device.get("processes") or []:
-            pid = int(record["pid"])
-            detail = details.get(pid) or {}
-            container_id = str(detail.get("container_id") or "").lower()
-            container = None
-            if container_id:
-                match = next(
-                    (item for item_id, item in by_id.items() if item_id == container_id or item_id.startswith(container_id) or container_id.startswith(item_id)),
-                    None,
-                )
-                container = {
-                    "id": (match or {}).get("id") or container_id,
-                    "short_id": container_id[:12],
-                    "name": (match or {}).get("name"),
-                    "image": (match or {}).get("image"),
-                    "status": (match or {}).get("status"),
-                    "source": "cgroup" if match else "cgroup-unmatched",
-                }
-            enriched.append({
-                **record,
-                "name": detail.get("name") or record.get("npu_process_name"),
-                "user": detail.get("user"),
-                "cwd": detail.get("cwd"),
-                "command": detail.get("command"),
-                "executable": detail.get("executable"),
-                "proc_state": detail.get("proc_state"),
-                "wchan": detail.get("wchan"),
-                "disk_io_wait": bool(detail.get("disk_io_wait")),
-                "details_observed_at": detail.get("details_observed_at"),
-                "container": container,
-                "ownership_labels": extract_ownership_labels(
-                    detail.get("cwd"), (container or {}).get("name"),
-                ),
-            })
-        device["processes"] = enriched
-
-
-def is_device_busy(device: dict[str, Any], hbm_threshold_mb: int) -> bool:
-    return (
-        bool(device.get("processes"))
-        or float(device.get("aicore_percent") or 0) > 1
-        or int((device.get("hbm") or {}).get("used_mb") or 0) >= hbm_threshold_mb
-    )
-
-
-def _cleanup_facts(result) -> dict[str, str]:
+def _cleanup_facts(result: Any) -> dict[str, str]:
     error = getattr(result, "cleanup_error", None)
     return {"cleanup_error": error} if error else {}
+
+
+def _float(values: list[str], index: int) -> float | None:
+    try:
+        return float(values[index])
+    except (IndexError, ValueError):
+        return None
 
 
 class HostProbe:
@@ -446,12 +174,12 @@ class HostProbe:
         self.hbm_busy_threshold_mb = hbm_busy_threshold_mb
         self._cpu_counters: dict[str, tuple[int, int]] = {}
         self._infra_cache: dict[str, dict[str, Any]] = {}
+        self._infra_observed_at: dict[str, int] = {}
         self._process_cache: dict[str, dict[int, dict[str, Any]]] = {}
         self._preflighted: set[str] = set()
 
     def _run_script(self, server: dict[str, Any], script: str, timeout: int) -> RemoteCompleted:
-        # Text-mode stdin translates LF to CRLF on Windows, which corrupts
-        # shell options and heredocs. Keep the SSH wire format UTF-8 bytes.
+        # Keep SSH stdin UTF-8 LF bytes so Windows text mode never injects CRLF.
         return capture_ssh(
             self.adapter, server, ["bash", "-s"], timeout_ms=timeout * 1000,
             input=script.replace("\r\n", "\n").encode("utf-8"),
@@ -460,11 +188,7 @@ class HostProbe:
     def _run_python(
         self, server: dict[str, Any], source: str, args: list[str], inner_seconds: int,
     ) -> RemoteCompleted:
-        """Bound the remote getter before the SSH deadline (no remote file write).
-
-        Outer SSH timeout is `inner + kill_after + cleanup_grace`, never a
-        `min` that truncates the inner `timeout` budget.
-        """
+        """Bound the remote getter before the SSH deadline (`outer = inner + kill + grace`)."""
         inner = max(1, int(inner_seconds))
         outer = inner + DCMI_KILL_AFTER_SECONDS + DCMI_CLEANUP_GRACE_SECONDS
         return capture_ssh(
@@ -477,11 +201,24 @@ class HostProbe:
             input=source.replace("\r\n", "\n").encode("utf-8"),
         )
 
-    def _collect_process_details(self, server: dict[str, Any], pids: list[int]) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
+    def _collect_process_details(
+        self, server: dict[str, Any], pids: list[int], *, deadline: float | None = None,
+    ) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
         if not pids:
             return {}, {"state": "unchanged"}
+        outer = min(self.timeout, 15)
+        if deadline is not None:
+            rem = deadline - time.monotonic()
+            avail = int(math.floor(rem))
+            if avail < 4:
+                return {}, {
+                    "state": "skipped", "stage": "process_details",
+                    "reason": "collection_deadline_exhausted",
+                    "remaining_seconds": round(max(0.0, rem), 3), "required_timeout": 4,
+                }
+            outer = min(outer, avail)
         try:
-            result = self._run_script(server, build_process_detail_script(pids), min(self.timeout, 15))
+            result = self._run_script(server, build_process_detail_script(pids), outer)
         except (TimeoutError, OSError, subprocess.TimeoutExpired) as exc:
             return {}, {"state": "unavailable", "stage": "process_details", "error_type": type(exc).__name__,
                         **_cleanup_facts(exc)}
@@ -495,7 +232,6 @@ class HostProbe:
         details = parse_process_details(sections["process_details"])
         for detail in details.values():
             detail["details_observed_at"] = observed_at
-        # A process can exit between the device sample and /proc lookup.
         return details, {"state": "observed", "observed_at": observed_at, **_cleanup_facts(result)}
 
     @staticmethod
@@ -553,29 +289,34 @@ class HostProbe:
         }
 
     def _collect_npu_frequency(
-        self, server: dict[str, Any], npu_ids: list[int],
+        self, server: dict[str, Any], npu_ids: list[int], *, deadline: float | None = None,
     ) -> tuple[dict[int, dict[str, Any]], dict[str, Any]]:
-        """Read current AICore frequency from the optional card-scoped `-t common` pass.
-
-        Frequency is supplementary telemetry: a timeout, SSH error, or driver
-        that does not support `-t common` leaves the register absent instead of
-        failing the main NPU health probe or falling back to the rated clock.
-        A killed SSH call still contributes any complete sections already printed.
-        """
+        """Read current AICore frequency from the optional card-scoped `-t common` pass."""
         cards = sorted({int(npu_id) for npu_id in npu_ids
                         if not isinstance(npu_id, bool) and isinstance(npu_id, int) and npu_id >= 0})
         if not cards:
             return {}, {"state": "not_applicable"}
+        min_req = FREQUENCY_CARD_TIMEOUT_SECONDS + FREQUENCY_CLEANUP_GRACE_SECONDS + 1
         plan = frequency_probe_plan(self.timeout)
         if plan is None:
             return {}, {
                 "state": "unavailable", "stage": "npu_frequency",
                 "error_type": "ConfiguredTimeoutTooSmall",
-                "configured_timeout": self.timeout,
-                "required_timeout": FREQUENCY_CARD_TIMEOUT_SECONDS + FREQUENCY_CLEANUP_GRACE_SECONDS + 1,
+                "configured_timeout": self.timeout, "required_timeout": min_req,
                 "cards": cards, "observed_cards": [], "missing_cards": cards,
                 "failed_cards": [], "card_exit_codes": {},
             }
+        if deadline is not None:
+            rem = deadline - time.monotonic()
+            plan = frequency_probe_plan(min(self.timeout, int(math.floor(rem))))
+            if plan is None:
+                return {}, {
+                    "state": "skipped", "stage": "npu_frequency",
+                    "reason": "collection_deadline_exhausted",
+                    "remaining_seconds": round(max(0.0, rem), 3), "required_timeout": min_req,
+                    "cards": cards, "observed_cards": [], "missing_cards": cards,
+                    "failed_cards": [], "card_exit_codes": {},
+                }
         budget, outer_timeout = plan
         script = build_frequency_script(cards, budget)
         try:
@@ -591,8 +332,7 @@ class HostProbe:
                 **_cleanup_facts(exc),
             )
         except OSError as exc:
-            return {}, {"state": "unavailable", "stage": "npu_frequency",
-                        "error_type": type(exc).__name__}
+            return {}, {"state": "unavailable", "stage": "npu_frequency", "error_type": type(exc).__name__}
         parsed = self._parse_frequency_sections(result.stdout)
         exit_codes = self._parse_frequency_exit_codes(result.stdout)
         if not parsed:
@@ -611,15 +351,9 @@ class HostProbe:
         )
 
     def _collect_dcmi(
-        self, server: dict[str, Any], npu_ids: list[int],
+        self, server: dict[str, Any], npu_ids: list[int], *, deadline: float | None = None,
     ) -> dict[str, Any]:
-        """Read the DCMI AICORE_FREQREDUC_CAUSE mask without failing the main probe.
-
-        The helper is a separate stdlib-only module sent over SSH stdin; it runs
-        on the NPU host where `libdcmi.so` lives. A missing python3/library, a
-        timeout, or a malformed reply degrades to an explicit unavailable block
-        with null decoded fields.
-        """
+        """Read the DCMI AICORE_FREQREDUC_CAUSE mask without failing the main probe."""
         cards = sorted({int(npu_id) for npu_id in npu_ids
                         if not isinstance(npu_id, bool) and isinstance(npu_id, int) and npu_id >= 0})
         if not cards:
@@ -632,6 +366,16 @@ class HostProbe:
                 "configured_timeout": self.timeout,
                 "required_timeout": DCMI_OUTER_TIMEOUT_SECONDS,
             }
+        if deadline is not None:
+            rem = deadline - time.monotonic()
+            plan = dcmi_probe_plan(min(self.timeout, int(math.floor(rem))))
+            if plan is None:
+                return {
+                    "state": "skipped", "stage": "dcmi",
+                    "reason": "collection_deadline_exhausted",
+                    "remaining_seconds": round(max(0.0, rem), 3),
+                    "required_timeout": DCMI_OUTER_TIMEOUT_SECONDS,
+                }
         inner_seconds, _outer_timeout = plan
         try:
             source = Path(dcmi_telemetry.__file__).read_text(encoding="utf-8")
@@ -654,16 +398,13 @@ class HostProbe:
                     "error_type": type(exc).__name__, "error": str(exc)[-800:]}
         if result.returncode != 0:
             return {
-                "state": "unavailable", "stage": "dcmi",
-                "exit_code": result.returncode,
-                "error": (result.stderr or "DCMI helper failed")[-800:],
-                **_cleanup_facts(result),
+                "state": "unavailable", "stage": "dcmi", "exit_code": result.returncode,
+                "error": (result.stderr or "DCMI helper failed")[-800:], **_cleanup_facts(result),
             }
         try:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
-            return {"state": "unavailable", "stage": "dcmi",
-                    "error_type": type(exc).__name__,
+            return {"state": "unavailable", "stage": "dcmi", "error_type": type(exc).__name__,
                     "error": (result.stdout or result.stderr or "invalid DCMI JSON")[-800:]}
         if not isinstance(payload, dict):
             return {"state": "unavailable", "stage": "dcmi",
@@ -673,18 +414,71 @@ class HostProbe:
         payload.setdefault("observed_at", int(time.time()))
         return payload
 
-    def collect(self, server: dict[str, Any], include_infrastructure: bool) -> dict[str, Any]:
+    def collect(
+        self, server: dict[str, Any], include_infrastructure: bool,
+        *, deadline: float | None = None, budget_seconds: float | None = None,
+    ) -> dict[str, Any]:
         started = time.monotonic()
+        default_base = max(self.timeout + 25, 45) if include_infrastructure else self.timeout
+        active_deadline = (
+            float(deadline) if deadline is not None
+            else started + float(budget_seconds) if budget_seconds is not None
+            else started + max(float(default_base), 30.0)
+        )
         if server["id"] not in self._preflighted:
             preflight = self.adapter.preflight(server)
             if not preflight["ok"]:
                 raise RuntimeError(str(preflight.get("error") or "本地 OpenSSH 配置预检失败"))
             self._preflighted.add(server["id"])
-        # Optional commands (usage details, Docker stats/info) vary across
-        # driver/runtime versions. Their non-zero status must not replace the
-        # explicit npu_info_rc health gate above.
-        script = FAST_SCRIPT + (INFRA_SCRIPT if include_infrastructure else "") + "\nexit 0\n"
-        effective_timeout = max(self.timeout + 25, 45) if include_infrastructure else self.timeout
+        rem_base = max(1, int(math.ceil(active_deadline - time.monotonic())))
+        effective_timeout = min(default_base, rem_base) if (deadline is not None or budget_seconds is not None) else default_base
+        include_infra_cmds = include_infrastructure
+        fast_script = FAST_SCRIPT
+        infra_script = INFRA_SCRIPT
+        if include_infrastructure and effective_timeout < 45:
+            if effective_timeout >= 28:
+                # 8 + 8 + 2 + 4 + 2 = 24s inner + >= 4s cleanup grace <= effective_timeout.
+                infra_script = (
+                    INFRA_SCRIPT.replace("timeout 10 docker stats", "timeout 4 docker stats")
+                    .replace("timeout 5 docker ", "timeout 2 docker ")
+                )
+            elif effective_timeout >= 9:
+                # Budget all 5 inner timeouts within effective_timeout - 4s cleanup grace (>= 5s pool).
+                inner_pool = effective_timeout - 4
+                d_ps, d_stats, d_info = 1, max(1, inner_pool // 5), 1
+                rem_smi = max(2, inner_pool - (d_ps + d_stats + d_info))
+                smi_info = (rem_smi + 1) // 2
+                smi_usage = max(1, rem_smi - smi_info)
+                fast_script = (
+                    FAST_SCRIPT.replace("timeout 8 npu-smi info 2>&1", f"timeout {smi_info} npu-smi info 2>&1")
+                    .replace("timeout 8 npu-smi info -t usages", f"timeout {smi_usage} npu-smi info -t usages")
+                )
+                infra_script = (
+                    INFRA_SCRIPT.replace("timeout 5 docker ps", f"timeout {d_ps} docker ps")
+                    .replace("timeout 10 docker stats", f"timeout {d_stats} docker stats")
+                    .replace("timeout 5 docker info", f"timeout {d_info} docker info")
+                )
+            else:
+                # Remaining deadline (< 9s) cannot cover 5 inner commands + 4s cleanup grace.
+                include_infra_cmds = False
+        if not include_infra_cmds and effective_timeout < 20:
+            if effective_timeout >= 6:
+                inner_pool = effective_timeout - 4
+                smi_info = (inner_pool + 1) // 2
+                smi_usage = inner_pool - smi_info
+                fast_script = FAST_SCRIPT.replace("timeout 8 npu-smi info 2>&1", f"timeout {smi_info} npu-smi info 2>&1")
+                if smi_usage >= 1:
+                    fast_script = fast_script.replace("timeout 8 npu-smi info -t usages", f"timeout {smi_usage} npu-smi info -t usages")
+                else:
+                    fast_script = fast_script.replace("timeout 8 npu-smi info -t usages 2>&1", "true")
+            else:
+                smi_info = max(1, effective_timeout - 1)
+                effective_timeout = max(effective_timeout, smi_info + 2)
+                fast_script = (
+                    FAST_SCRIPT.replace("timeout 8 npu-smi info 2>&1", f"timeout {smi_info} npu-smi info 2>&1")
+                    .replace("timeout 8 npu-smi info -t usages 2>&1", "true")
+                )
+        script = fast_script + (infra_script if include_infra_cmds else "") + "\nexit 0\n"
         try:
             result = self._run_script(server, script, effective_timeout)
         except (subprocess.TimeoutExpired, TimeoutError) as exc:
@@ -709,13 +503,11 @@ class HostProbe:
         npu = self.adapter.parse_npu(sections.get("npu_info", ""), sections.get("npu_usages", ""))
         devices = npu.get("devices", [])
         frequencies, frequency_status = self._collect_npu_frequency(
-            server, [device["npu_id"] for device in devices],
+            server, [device["npu_id"] for device in devices], deadline=active_deadline,
         )
         for device in devices:
             frequency = frequencies.get(int(device["npu_id"])) or {}
             exit_code = (frequency_status.get("card_exit_codes") or {}).get(str(device["npu_id"]))
-            # A partial command may print register-shaped text before failing.
-            # Only a completed card read contributes values to stored telemetry.
             if exit_code == 0:
                 if frequency.get("freq_mhz") is not None:
                     device["freq_mhz"] = frequency["freq_mhz"]
@@ -726,14 +518,18 @@ class HostProbe:
             if exit_code is not None:
                 device["frequency_exit_code"] = exit_code
             device["busy"] = is_device_busy(device, self.hbm_busy_threshold_mb)
-        dcmi_status = self._collect_dcmi(server, [device["npu_id"] for device in devices])
+        dcmi_status = self._collect_dcmi(
+            server, [device["npu_id"] for device in devices], deadline=active_deadline,
+        )
         dcmi_cards = dcmi_status.get("cards") or {}
         for device in devices:
             card_status = dcmi_cards.get(str(device["npu_id"]))
             if card_status is not None:
                 device["dcmi_freq_reduc"] = card_status
 
-        if include_infrastructure:
+        collected_at_ns = time.time_ns()
+        collected_sec = int(collected_at_ns // 1_000_000_000)
+        if include_infra_cmds:
             infrastructure = {
                 "disks": parse_disks(sections.get("disk", "")),
                 "mounts": parse_mounts(sections.get("mounts", "")),
@@ -742,16 +538,25 @@ class HostProbe:
                 ),
             }
             self._infra_cache[server_id] = infrastructure
+            self._infra_observed_at[server_id] = collected_sec
+            infrastructure_probe: dict[str, Any] = {"state": "observed", "observed_at": collected_sec}
         else:
-            infrastructure = self._infra_cache.get(server_id, {"disks": [], "mounts": [], "docker": {"available": None, "containers": [], "running": None}})
+            infrastructure = self._infra_cache.get(
+                server_id, {"disks": [], "mounts": [], "docker": {"available": None, "containers": [], "running": None}},
+            )
+            cached_at = self._infra_observed_at.get(server_id)
+            infrastructure_probe = (
+                {"state": "skipped", "reason": "collection_deadline_exhausted", "cached_observed_at": cached_at}
+                if include_infrastructure
+                else {"state": "cached", "cached_observed_at": cached_at}
+            )
 
         active_pids = sorted({
             int(p["pid"]) for d in devices for p in (d.get("processes") or []) if int(p.get("pid") or 0) > 0
         })
         process_cache = self._process_cache.setdefault(server_id, {})
         stale_pids = active_pids if include_infrastructure else [pid for pid in active_pids if pid not in process_cache]
-        details, detail_status = self._collect_process_details(server, stale_pids)
-        # A failed refresh cannot relabel old PID metadata as newly observed.
+        details, detail_status = self._collect_process_details(server, stale_pids, deadline=active_deadline)
         for pid in stale_pids:
             process_cache.pop(pid, None)
         process_cache.update(details)
@@ -770,19 +575,11 @@ class HostProbe:
             "docker_running": infrastructure["docker"].get("running"),
             "disk_max_percent": max((disk["used_percent"] for disk in disks), default=None),
         }
-        collected_at_ns = time.time_ns()
         return {
             "server_id": server_id, "collected_at": collected_at_ns / 1_000_000_000,
             "collected_at_ns": collected_at_ns, "duration_ms": round((time.monotonic() - started) * 1000),
             "hostname": sections.get("hostname") or server["name"], "summary": summary,
-            "devices": devices, **infrastructure, "process_details": detail_status,
-            "frequency_probe": frequency_status, "dcmi": dcmi_status,
+            "devices": devices, **infrastructure, "infrastructure_probe": infrastructure_probe,
+            "process_details": detail_status, "frequency_probe": frequency_status, "dcmi": dcmi_status,
             **({"transport": _cleanup_facts(result)} if _cleanup_facts(result) else {}),
         }
-
-
-def _float(values: list[str], index: int) -> float | None:
-    try:
-        return float(values[index])
-    except (IndexError, ValueError):
-        return None

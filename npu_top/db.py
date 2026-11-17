@@ -22,7 +22,7 @@ from typing import Any
 from . import dcmi_store
 from .dcmi_store import SAMPLE_COLUMNS, TELEMETRY_RUN_INDEXES, TELEMETRY_RUN_TABLE
 from .telemetry_extract import extract_raw_metrics, seconds_to_ns
-from .telemetry_window import run_index_range
+from .telemetry_window import build_window, run_index_range
 
 
 SCHEMA = """
@@ -104,22 +104,24 @@ SCHEMA += rollup_schema("host_rollups", HOST_METRICS) + rollup_schema("device_ro
 SCHEMA += DEVICE_SAMPLES_TABLE + TELEMETRY_RUN_TABLE + "".join(TELEMETRY_RUN_INDEXES)
 
 
-def bounded_history(method):
-    @wraps(method)
-    def query(self, *args, **kwargs):
-        if not self._history_slots.acquire(blocking=False):
-            raise sqlite3.OperationalError("History queries busy; retry later")
-        connection = None
-        try:
-            connection = self.connection()
-            deadline = time.monotonic() + 3
-            connection.set_progress_handler(lambda: int(time.monotonic() > deadline), 10000)
-            return method(self, *args, **kwargs)
-        finally:
-            if connection is not None:
-                connection.set_progress_handler(None, 0)
-            self._history_slots.release()
-    return query
+def bounded_history(method=None, *, timeout_seconds: float = 3.0):
+    def decorate(fn):
+        @wraps(fn)
+        def query(self, *args, **kwargs):
+            if not self._history_slots.acquire(blocking=False):
+                raise sqlite3.OperationalError("History queries busy; retry later")
+            connection = None
+            try:
+                connection = self.connection()
+                deadline = time.monotonic() + timeout_seconds
+                connection.set_progress_handler(lambda: int(time.monotonic() > deadline), 10000)
+                return fn(self, *args, **kwargs)
+            finally:
+                if connection is not None:
+                    connection.set_progress_handler(None, 0)
+                self._history_slots.release()
+        return query
+    return decorate if method is None else decorate(method)
 
 
 _IS_WINDOWS = os.name == "nt"
@@ -574,21 +576,17 @@ class Database:
                 )
         return list(points.values())
 
-    @bounded_history
-    def telemetry_samples(
+    def _prepare_window_cursor(
         self, server_id: str, devices: list[int], start_ts: float, end_ts: float,
         *, start_ts_ns: int | None = None, end_ts_ns: int | None = None,
-    ) -> dict[str, Any]:
-        """Return raw device samples, declared runs, and rollup coverage for one window."""
+    ) -> tuple[sqlite3.Cursor | None, list[dict[str, Any]], int, int | None, int | None]:
         if not devices:
-            return {
-                "samples": [], "runs": [], "rollup_sample_count": 0,
-                "start_ts_ns": start_ts_ns, "end_ts_ns": end_ts_ns,
-            }
+            return None, [], 0, start_ts_ns, end_ts_ns
         start_ns = int(start_ts_ns) if start_ts_ns is not None else seconds_to_ns(start_ts)
         end_ns = int(end_ts_ns) if end_ts_ns is not None else seconds_to_ns(end_ts)
+        conn = self.connection()
         runs = [
-            dict(row) for row in self.connection().execute(
+            dict(row) for row in conn.execute(
                 """
                 SELECT run_id, clock_domain, cards_json, interval_ns, schedule_anchor_ns,
                        first_sample_index, last_sample_index, captured_samples,
@@ -598,7 +596,7 @@ class Database:
                 ORDER BY schedule_anchor_ns
                 """,
                 (server_id,),
-            ).fetchall()
+            )
         ]
         scheduled_ranges = {
             run["run_id"]: bounds for run in runs
@@ -621,7 +619,19 @@ class Database:
         else:
             conditions.append("sample_ts_ns BETWEEN ? AND ?")
             condition_params.extend([start_ns, end_ns])
-        rows = self.connection().execute(
+        rollup = conn.execute(
+            f"""
+            SELECT COALESCE(SUM(sample_count), 0)
+            FROM device_rollups
+            WHERE server_id=? AND bucket>=? AND bucket<=?
+              AND npu_id IN ({placeholders})
+            """,
+            [
+                server_id, (start_ns // 1_000_000_000) // 900 * 900,
+                (end_ns // 1_000_000_000) // 900 * 900, *[int(d) for d in devices],
+            ],
+        ).fetchone()[0]
+        cursor = conn.execute(
             f"""
             SELECT npu_id, sample_ts_ns, collected_at, name, aicore_percent, hbm_used_mb,
                    temperature_c, power_w, freq_mhz, throttling_flag,
@@ -634,33 +644,58 @@ class Database:
             FROM device_samples
             WHERE server_id=? AND npu_id IN ({placeholders})
               AND ({' OR '.join(conditions)})
-            ORDER BY npu_id, sample_index, sample_ts_ns
+            ORDER BY window_ts_ns, npu_id, sample_index
             """,
-            [
-                server_id, *[int(device) for device in devices], *condition_params,
-            ],
-        ).fetchall()
-        start_seconds = start_ns // 1_000_000_000
-        end_seconds = end_ns // 1_000_000_000
-        rollup = self.connection().execute(
-            f"""
-            SELECT COALESCE(SUM(sample_count), 0)
-            FROM device_rollups
-            WHERE server_id=? AND bucket>=? AND bucket<=?
-              AND npu_id IN ({placeholders})
-            """,
-            [
-                server_id, start_seconds // 900 * 900, end_seconds // 900 * 900,
-                *[int(device) for device in devices],
-            ],
-        ).fetchone()[0]
+            [server_id, *[int(device) for device in devices], *condition_params],
+        )
+        return cursor, runs, int(rollup or 0), start_ns, end_ns
+
+    @bounded_history(timeout_seconds=15.0)
+    def telemetry_samples(
+        self, server_id: str, devices: list[int], start_ts: float, end_ts: float,
+        *, start_ts_ns: int | None = None, end_ts_ns: int | None = None,
+    ) -> dict[str, Any]:
+        """Return raw device samples, declared runs, and rollup coverage for one window."""
+        cursor, runs, rollup, start_ns, end_ns = self._prepare_window_cursor(
+            server_id, devices, start_ts, end_ts, start_ts_ns=start_ts_ns, end_ts_ns=end_ts_ns,
+        )
+        samples: list[dict[str, Any]] = []
+        if cursor is not None:
+            try:
+                while batch := cursor.fetchmany(2048):
+                    samples.extend(dict(row) for row in batch)
+            finally:
+                cursor.close()
         return {
-            "samples": [dict(row) for row in rows],
-            "runs": [dict(row) for row in runs],
-            "rollup_sample_count": int(rollup or 0),
-            "start_ts_ns": start_ns,
-            "end_ts_ns": end_ns,
+            "samples": samples, "runs": runs, "rollup_sample_count": rollup,
+            "start_ts_ns": start_ns, "end_ts_ns": end_ns,
         }
+
+    @bounded_history(timeout_seconds=15.0)
+    def telemetry_window(
+        self, server: dict[str, Any], devices: list[int], start_ts: float, end_ts: float,
+        *, start_ts_ns: int | None = None, end_ts_ns: int | None = None,
+        now: int | None = None, batch_size: int = 2048,
+    ) -> dict[str, Any]:
+        """Stream raw window rows in bounded cursor chunks directly into `build_window`."""
+        cursor, runs, rollup, start_ns, end_ns = self._prepare_window_cursor(
+            server["id"], devices, start_ts, end_ts, start_ts_ns=start_ts_ns, end_ts_ns=end_ts_ns,
+        )
+
+        def _row_stream():
+            if cursor is None:
+                return
+            try:
+                while batch := cursor.fetchmany(batch_size):
+                    yield from batch
+            finally:
+                cursor.close()
+
+        return build_window(
+            server, _row_stream(), devices=devices, start_ts=start_ts, end_ts=end_ts,
+            start_ts_ns=start_ns, end_ts_ns=end_ns, runs=runs,
+            rollup_sample_count=rollup, now=now,
+        )
 
     def latest_persisted(self) -> dict[str, int]:
         rows = self.connection().execute(

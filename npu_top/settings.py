@@ -1,15 +1,21 @@
 """Environment-driven configuration for `npu-top`.
 
 [Role] Parses and validates primary `MINDIE_TOP_*` environment variables (legacy `NFM_*` aliases remain accepted) into an immutable `Settings` dataclass.
-[Invariants] `MINDIE_TOP_*` takes precedence over `NFM_*`; malformed or out-of-range explicit settings raise `ValueError` instead of silently falling back to defaults.
-[Timeouts & Locks] Default `ssh_timeout=20s` exceeds inner `timeout 8` `npu-smi` commands; zero locks.
-[Side-Effect Policy] `prepare()` creates the monitor state directory (`0o700`); SSH state belongs to remote-dev.
+[Invariants] `MINDIE_TOP_*` takes precedence over `NFM_*`; malformed or out-of-range explicit settings raise `ValueError` instead of silently falling back to defaults. Unconfigured installs default to an owned MindIE/XDG state directory and adopt `./data` ONLY when it already holds a verified `npu-top` SQLite database (never polluting arbitrary working directories or moving unrelated `./data` folders).
+[Timeouts & Locks] Default `ssh_timeout=20s` exceeds inner `timeout 8` `npu-smi` commands; read-only legacy DB inspection opens with `?mode=ro` (`timeout=1.0`) and acquires zero write locks.
+[Side-Effect Policy] `load()` is strictly read-only (never mutating `os.environ` or creating WAL sidecars); `prepare()` creates the monitor state directory (`0o700` on POSIX).
 """
 from __future__ import annotations
 
+import contextlib
 import os
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
+
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+_RECOGNIZED_TABLES = ("servers", "host_rollups", "device_rollups", "device_samples", "telemetry_runs")
+_LEGACY_DB_NAMES = ("monitor.sqlite3", "npu_top.sqlite3")
 
 
 def _env(primary: str, legacy: str | None = None) -> str | None:
@@ -38,11 +44,49 @@ def _number(primary: str, default: int, minimum: int, legacy: str | None = None)
 def _paths(primary: str, legacy: str | None = None) -> tuple[Path, ...]:
     """Parse an ``os.pathsep``-separated list of file paths from the environment."""
     raw = _env(primary, legacy) or ""
-    return tuple(
-        Path(item).expanduser()
-        for item in raw.split(os.pathsep)
-        if item.strip()
-    )
+    return tuple(Path(item).expanduser() for item in raw.split(os.pathsep) if item.strip())
+
+
+def _is_recognized_npu_top_db(db_file: Path) -> bool:
+    """Verify read-only that ``db_file`` is an existing `npu-top` SQLite DB without creating WAL sidecars."""
+    try:
+        if not db_file.is_file():
+            return False
+        with db_file.open("rb") as fh:
+            if fh.read(16) != _SQLITE_MAGIC:
+                return False
+        query_flag = "mode=ro" if db_file.with_name(f"{db_file.name}-wal").exists() else "immutable=1"
+        uri = f"{db_file.resolve().as_uri()}?{query_flag}"
+        with contextlib.closing(sqlite3.connect(uri, timeout=1.0, uri=True)) as conn:
+            placeholders = ",".join("?" for _ in _RECOGNIZED_TABLES)
+            row = conn.execute(
+                f"SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ({placeholders}) LIMIT 1",
+                _RECOGNIZED_TABLES,
+            ).fetchone()
+            return row is not None
+    except TimeoutError:
+        raise
+    except (sqlite3.Error, OSError, ValueError):
+        return False
+
+
+def default_state_dir(*, cwd: Path | None = None) -> Path:
+    """Resolve owned state directory, adopting `./data` only if it already holds a genuine `npu-top` DB."""
+    active_cwd = Path.cwd() if cwd is None else Path(cwd)
+    legacy_dir = active_cwd / "data"
+    if any(_is_recognized_npu_top_db(legacy_dir / name) for name in _LEGACY_DB_NAMES):
+        return legacy_dir.resolve()
+    mindie_data = (os.environ.get("MINDIE_DATA_HOME") or "").strip()
+    if mindie_data:
+        return (Path(mindie_data).expanduser() / "npu-top").resolve()
+    xdg_data = (os.environ.get("XDG_DATA_HOME") or "").strip()
+    if xdg_data:
+        return (Path(xdg_data).expanduser() / "mindie-agent" / "npu-top").resolve()
+    if os.name == "nt":
+        local_app = (os.environ.get("LOCALAPPDATA") or "").strip()
+        if local_app:
+            return (Path(local_app).expanduser() / "mindie-agent" / "npu-top").resolve()
+    return (Path.home() / ".local" / "share" / "mindie-agent" / "npu-top").resolve()
 
 
 @dataclass(frozen=True)
@@ -61,13 +105,16 @@ class Settings:
     # Inventory is explicitly configured, never inferred from a checkout.
     inventory_files: tuple[Path, ...] = ()
     host_pool_files: tuple[Path, ...] = ()
-
     sqlite_max_mb: int = 1024
 
     @classmethod
     def load(cls) -> "Settings":
         raw_state_dir = _env("MINDIE_TOP_STATE_DIR", "NFM_STATE_DIR")
-        state_dir = Path(raw_state_dir or Path.cwd() / "data").expanduser().resolve()
+        state_dir = (
+            Path(raw_state_dir).expanduser().resolve()
+            if raw_state_dir and raw_state_dir.strip()
+            else default_state_dir()
+        )
         return cls(
             project_root=state_dir,
             state_dir=state_dir,
@@ -89,4 +136,5 @@ class Settings:
 
     def prepare(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        self.state_dir.chmod(0o700)
+        if os.name != "nt":
+            self.state_dir.chmod(0o700)

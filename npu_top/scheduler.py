@@ -48,6 +48,7 @@ class AdaptiveScheduler:
         self._collecting = False
         self._manual: set[str] = set()
         self._force_infrastructure: set[str] = set()
+        self._request_deadlines: dict[str, float] = {}
         self._request_generation = 0
         self._completed_requests: dict[str, int] = {}
         self._infrastructure_results: dict[str, tuple[int, dict[str, Any]]] = {}
@@ -104,6 +105,8 @@ class AdaptiveScheduler:
             self._request_generation += 1
             requested_generation = self._request_generation
             self._manual.add(server_id)
+            prev_dl = self._request_deadlines.get(server_id)
+            self._request_deadlines[server_id] = max(prev_dl, deadline) if prev_dl is not None else deadline
             if force_infrastructure:
                 self._force_infrastructure.add(server_id)
             self._condition.notify_all()
@@ -117,6 +120,10 @@ class AdaptiveScheduler:
                     completed_generation = self._completed_requests.get(server_id, 0)
                     current = self._snapshots.get(server_id)
                 if current is not None and completed_generation >= requested_generation:
+                    if force_infrastructure and (current.get("infrastructure_probe") or {}).get("state") == "skipped":
+                        raise TimeoutError(
+                            f"live collection timed out after {timeout:g}s (insufficient budget for infrastructure)"
+                        )
                     return dict(current)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -222,6 +229,12 @@ class AdaptiveScheduler:
         if request_generation is None:
             with self._condition:
                 request_generation = self._request_generation
+                req_deadlines = dict(self._request_deadlines)
+                self._request_deadlines.clear()
+        else:
+            with self._condition:
+                req_deadlines = dict(self._request_deadlines)
+                self._request_deadlines.clear()
         servers = [server for server in self.db.list_servers() if server["enabled"]]
         if targets and "*" not in targets:
             servers = [server for server in servers if server["id"] in targets]
@@ -237,7 +250,9 @@ class AdaptiveScheduler:
                     or server["id"] in force_infrastructure
                     or now - self._last_infra.get(server["id"], 0) >= self.settings.infrastructure_interval
                 )
-                futures[pool.submit(wrap_context(self._collect_one), server, include_infra)] = (server, include_infra)
+                futures[pool.submit(
+                    wrap_context(self._collect_one), server, include_infra, req_deadlines.get(server["id"]),
+                )] = (server, include_infra)
             for future in as_completed(futures):
                 server, include_infra = futures[future]
                 try:
@@ -264,7 +279,8 @@ class AdaptiveScheduler:
                                 request_generation, self._snapshots[server["id"]])
                         self._condition.notify_all()
                     continue
-                if include_infra:
+                infra_skipped = (snapshot.get("infrastructure_probe") or {}).get("state") == "skipped"
+                if include_infra and not infra_skipped:
                     self._last_infra[server["id"]] = time.monotonic()
                 last_persisted = self._latest_persisted.get(server["id"], 0)
                 persist = int(snapshot["collected_at"]) - last_persisted >= self.settings.history_interval
@@ -309,19 +325,25 @@ class AdaptiveScheduler:
                 write()
             except Exception as exc:
                 diagnostic.fail("observation_record_failed", exception=exc)
-                return {"state": "failed", "error_type": type(exc).__name__,
-                        "sqlite_errorcode": getattr(exc, "sqlite_errorcode", None),
-                        "additional_failures": list(getattr(exc, "__notes__", [])),
-                        "diagnostic_ref": diagnostic.summary()["operation_id"]}
+                return {
+                    "state": "failed", "error_type": type(exc).__name__,
+                    "sqlite_errorcode": getattr(exc, "sqlite_errorcode", None),
+                    "additional_failures": list(getattr(exc, "__notes__", [])),
+                    "diagnostic_ref": diagnostic.summary()["operation_id"],
+                    "receipt_unconfirmed": True,
+                    "receipt_warning": f"local history persistence failed ({type(exc).__name__}); live observation preserved",
+                }
         return {"state": "recorded"}
 
-    def _collect_one(self, server, include_infra):
+    def _collect_one(self, server, include_infra, deadline: float | None = None):
         # Measure within the actual worker, excluding time queued in the pool.
         # perf_counter is monotonic and uses QPC on Windows Python 3.11/3.12;
         # time.monotonic there has a 15.625 ms GetTickCount64 resolution.
         started = time.perf_counter()
         try:
             with get_recorder("npu-top").operation("top.probe", level="DEBUG"):
+                if isinstance(self.probe, HostProbe):
+                    return self.probe.collect(server, include_infra, deadline=deadline)
                 return self.probe.collect(server, include_infra)
         except Exception as exc:
             raise _ProbeFailure(exc, round((time.perf_counter() - started) * 1000, 3)) from exc

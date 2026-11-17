@@ -369,6 +369,16 @@ def npu_status(
         },
         "devices": devices,
         **({"recording": snapshot["recording"]} if snapshot and "recording" in snapshot else {}),
+        **(
+            {
+                "receipt_unconfirmed": True,
+                "receipt_warning": snapshot["recording"].get(
+                    "receipt_warning", "local history persistence failed; live observation preserved",
+                ),
+            }
+            if snapshot and (snapshot.get("recording") or {}).get("state") == "failed"
+            else {}
+        ),
         **({"process_details": (snapshot or {}).get("process_details", {"state": "not_observed"})}
            if include_processes or detailed_processes else {}),
         **({"error": str((snapshot or {}).get("error") or server.get("last_error"))[-240:]} if compact["status"] == "offline" else {}),
@@ -406,6 +416,9 @@ def server_status(
             "mounts": weight_mounts(snapshot),
         }
         result["docker"] = (snapshot or {}).get("docker") or {"available": None, "containers": []}
+        infra_probe = (snapshot or {}).get("infrastructure_probe")
+        if isinstance(infra_probe, dict):
+            result["infrastructure_probe"] = dict(infra_probe)
     return result
 
 
